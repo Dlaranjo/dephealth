@@ -39,3 +39,13 @@ htmlcov/
 
 # CDK context
 cdk.context.json
+
+# Landing page
+landing-page/node_modules/
+landing-page/dist/
+landing-page/.astro/
+
+# Terraform
+landing-page/terraform/.terraform/
+landing-page/terraform/*.tfstate*
+landing-page/terraform/.terraform.lock.hcl

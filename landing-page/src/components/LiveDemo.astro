@@ -1,0 +1,249 @@
+---
+const popularPackages = ['express', 'lodash', 'react', 'webpack', 'axios', 'typescript', 'eslint', 'jest']
+---
+
+<section id="demo" class="py-16 border-t border-[#1a1a1f] animate-fade-in-up stagger-2 opacity-0">
+  <span class="text-xs font-semibold tracking-widest uppercase text-blue-400 mb-4 block">
+    Live Demo
+  </span>
+
+  <h2 class="text-2xl md:text-3xl font-bold mb-4">
+    Try it now - no signup required
+  </h2>
+
+  <p class="text-zinc-400 mb-8 max-w-2xl">
+    Enter any npm package name to see its health score and risk assessment in real-time.
+  </p>
+
+  <!-- Demo Input -->
+  <div class="max-w-2xl">
+    <div class="flex flex-col sm:flex-row gap-3 mb-4">
+      <input
+        type="text"
+        id="package-input"
+        placeholder="Enter package name (e.g., express)"
+        class="flex-1 px-5 py-4 text-base bg-[#111113] border border-[#1a1a1f] rounded-xl text-white placeholder-zinc-500 focus:border-blue-500/50 focus:outline-none transition-all"
+      />
+      <button
+        id="check-btn"
+        class="btn-gradient px-7 py-4 text-base font-semibold text-white rounded-xl whitespace-nowrap"
+      >
+        Check Health
+      </button>
+    </div>
+
+    <!-- Quick picks -->
+    <div class="flex flex-wrap gap-2 mb-8">
+      <span class="text-xs text-zinc-500 mr-2">Try:</span>
+      {popularPackages.map((pkg) => (
+        <button
+          class="quick-pick px-3 py-1 text-xs bg-[#111113] border border-[#1a1a1f] rounded-lg text-zinc-400 hover:border-blue-500/50 hover:text-white transition-all cursor-pointer"
+          data-package={pkg}
+        >
+          {pkg}
+        </button>
+      ))}
+    </div>
+
+    <!-- Results -->
+    <div id="demo-results" class="hidden">
+      <div class="bg-[#111113] border border-[#1a1a1f] rounded-xl overflow-hidden">
+        <!-- Header -->
+        <div class="p-6 border-b border-[#1a1a1f] flex items-center justify-between">
+          <div>
+            <h3 id="result-package" class="text-xl font-bold">package-name</h3>
+            <p class="text-sm text-zinc-500">npm package</p>
+          </div>
+          <div id="result-badge" class="px-4 py-2 rounded-lg font-semibold">
+            <!-- Filled by JS -->
+          </div>
+        </div>
+
+        <!-- Scores -->
+        <div class="p-6 grid grid-cols-2 md:grid-cols-4 gap-4">
+          <div class="text-center">
+            <div id="result-health" class="text-3xl font-bold">--</div>
+            <div class="text-xs text-zinc-500 mt-1">Health Score</div>
+          </div>
+          <div class="text-center">
+            <div id="result-risk" class="text-3xl font-bold">--</div>
+            <div class="text-xs text-zinc-500 mt-1">Abandonment Risk</div>
+          </div>
+          <div class="text-center">
+            <div id="result-downloads" class="text-3xl font-bold">--</div>
+            <div class="text-xs text-zinc-500 mt-1">Weekly Downloads</div>
+          </div>
+          <div class="text-center">
+            <div id="result-stars" class="text-3xl font-bold">--</div>
+            <div class="text-xs text-zinc-500 mt-1">GitHub Stars</div>
+          </div>
+        </div>
+
+        <!-- Components -->
+        <div class="p-6 border-t border-[#1a1a1f]">
+          <h4 class="text-sm font-semibold text-zinc-400 mb-4">Health Components</h4>
+          <div class="grid grid-cols-2 md:grid-cols-4 gap-4">
+            <div>
+              <div class="flex justify-between text-xs mb-1">
+                <span class="text-zinc-500">Maintainer</span>
+                <span id="comp-maintainer">--</span>
+              </div>
+              <div class="h-2 bg-[#1a1a1f] rounded-full overflow-hidden">
+                <div id="bar-maintainer" class="h-full bg-blue-500 rounded-full transition-all" style="width: 0%"></div>
+              </div>
+            </div>
+            <div>
+              <div class="flex justify-between text-xs mb-1">
+                <span class="text-zinc-500">Evolution</span>
+                <span id="comp-evolution">--</span>
+              </div>
+              <div class="h-2 bg-[#1a1a1f] rounded-full overflow-hidden">
+                <div id="bar-evolution" class="h-full bg-green-500 rounded-full transition-all" style="width: 0%"></div>
+              </div>
+            </div>
+            <div>
+              <div class="flex justify-between text-xs mb-1">
+                <span class="text-zinc-500">Community</span>
+                <span id="comp-community">--</span>
+              </div>
+              <div class="h-2 bg-[#1a1a1f] rounded-full overflow-hidden">
+                <div id="bar-community" class="h-full bg-purple-500 rounded-full transition-all" style="width: 0%"></div>
+              </div>
+            </div>
+            <div>
+              <div class="flex justify-between text-xs mb-1">
+                <span class="text-zinc-500">User-centric</span>
+                <span id="comp-user">--</span>
+              </div>
+              <div class="h-2 bg-[#1a1a1f] rounded-full overflow-hidden">
+                <div id="bar-user" class="h-full bg-orange-500 rounded-full transition-all" style="width: 0%"></div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Loading -->
+    <div id="demo-loading" class="hidden text-center py-12">
+      <div class="inline-block w-8 h-8 border-2 border-blue-500 border-t-transparent rounded-full animate-spin"></div>
+      <p class="text-zinc-500 mt-4">Checking package health...</p>
+    </div>
+
+    <!-- Error -->
+    <div id="demo-error" class="hidden bg-red-900/20 border border-red-500/30 rounded-xl p-6 text-center">
+      <p class="text-red-400" id="error-message">Package not found</p>
+    </div>
+  </div>
+</section>
+
+<script>
+  const API_BASE = 'https://api.dephealth.laranjo.dev/v1';
+
+  const input = document.getElementById('package-input') as HTMLInputElement;
+  const checkBtn = document.getElementById('check-btn');
+  const results = document.getElementById('demo-results');
+  const loading = document.getElementById('demo-loading');
+  const error = document.getElementById('demo-error');
+  const quickPicks = document.querySelectorAll('.quick-pick');
+
+  function formatNumber(num: number): string {
+    if (num >= 1000000) return (num / 1000000).toFixed(1) + 'M';
+    if (num >= 1000) return (num / 1000).toFixed(1) + 'K';
+    return num?.toString() || '--';
+  }
+
+  function getRiskColor(level: string): string {
+    switch (level) {
+      case 'LOW': return 'bg-green-900/50 text-green-400';
+      case 'MEDIUM': return 'bg-yellow-900/50 text-yellow-400';
+      case 'HIGH': return 'bg-orange-900/50 text-orange-400';
+      case 'CRITICAL': return 'bg-red-900/50 text-red-400';
+      default: return 'bg-zinc-800 text-zinc-400';
+    }
+  }
+
+  async function checkPackage(packageName: string) {
+    if (!packageName.trim()) return;
+
+    results?.classList.add('hidden');
+    error?.classList.add('hidden');
+    loading?.classList.remove('hidden');
+
+    try {
+      const res = await fetch(`${API_BASE}/packages/npm/${encodeURIComponent(packageName)}`);
+      const data = await res.json();
+
+      loading?.classList.add('hidden');
+
+      if (data.error) {
+        error?.classList.remove('hidden');
+        const errorMsg = document.getElementById('error-message');
+        if (errorMsg) errorMsg.textContent = data.error.message || 'Package not found';
+        return;
+      }
+
+      // Update results
+      results?.classList.remove('hidden');
+
+      const pkgEl = document.getElementById('result-package');
+      if (pkgEl) pkgEl.textContent = data.package;
+
+      const badge = document.getElementById('result-badge');
+      if (badge) {
+        badge.textContent = `${data.health_score}/100 ${data.risk_level}`;
+        badge.className = `px-4 py-2 rounded-lg font-semibold ${getRiskColor(data.risk_level)}`;
+      }
+
+      const healthEl = document.getElementById('result-health');
+      if (healthEl) healthEl.textContent = data.health_score?.toFixed(1) || '--';
+
+      const riskEl = document.getElementById('result-risk');
+      if (riskEl) riskEl.textContent = data.abandonment_risk?.probability
+        ? `${data.abandonment_risk.probability.toFixed(1)}%`
+        : '--';
+
+      const downloadsEl = document.getElementById('result-downloads');
+      if (downloadsEl) downloadsEl.textContent = formatNumber(data.signals?.weekly_downloads);
+
+      const starsEl = document.getElementById('result-stars');
+      if (starsEl) starsEl.textContent = formatNumber(data.signals?.stars);
+
+      // Update component bars
+      const components = data.components || {};
+
+      const updateBar = (id: string, value: number) => {
+        const span = document.getElementById(`comp-${id}`);
+        const bar = document.getElementById(`bar-${id}`);
+        if (span) span.textContent = value?.toFixed(0) || '--';
+        if (bar) bar.style.width = `${value || 0}%`;
+      };
+
+      updateBar('maintainer', components.maintainer_health);
+      updateBar('evolution', components.evolution_health);
+      updateBar('community', components.community_health);
+      updateBar('user', components.user_centric);
+
+    } catch (e) {
+      loading?.classList.add('hidden');
+      error?.classList.remove('hidden');
+      const errorMsg = document.getElementById('error-message');
+      if (errorMsg) errorMsg.textContent = 'Failed to fetch package data';
+    }
+  }
+
+  checkBtn?.addEventListener('click', () => checkPackage(input?.value || ''));
+  input?.addEventListener('keypress', (e) => {
+    if (e.key === 'Enter') checkPackage(input.value);
+  });
+
+  quickPicks.forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const pkg = btn.getAttribute('data-package');
+      if (pkg && input) {
+        input.value = pkg;
+        checkPackage(pkg);
+      }
+    });
+  });
+</script>
