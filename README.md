@@ -2,6 +2,11 @@
 
 Predict which open-source packages are at risk of abandonment, maintenance decline, or becoming problematic - BEFORE issues occur.
 
+**Live Now:**
+- API: https://api.dephealth.laranjo.dev/v1/
+- Landing Page: https://dephealth.laranjo.dev
+- Documentation: https://dephealth.laranjo.dev/docs
+
 ## Project Structure
 
 ```
@@ -66,10 +71,10 @@ cdk deploy --all
 After deployment, set the secrets in AWS Secrets Manager:
 
 ```bash
-# GitHub token for API access
+# GitHub token for API access (plain token string)
 aws secretsmanager put-secret-value \
   --secret-id dephealth/github-token \
-  --secret-string '{"token":"ghp_your_token_here"}'
+  --secret-string 'ghp_your_token_here'
 
 # Stripe secrets (for payments)
 aws secretsmanager put-secret-value \
