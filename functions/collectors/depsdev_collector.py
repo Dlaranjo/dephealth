@@ -1,0 +1,215 @@
+"""
+deps.dev collector - Primary data source for DepHealth.
+
+deps.dev provides comprehensive package data with NO rate limits:
+- Package versions and metadata
+- Dependencies (direct + transitive)
+- Dependents count
+- Security advisories
+- OpenSSF Scorecard scores
+- License information
+"""
+
+import asyncio
+import logging
+from typing import Optional
+from urllib.parse import quote
+
+import httpx
+
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
+
+DEPSDEV_API = "https://api.deps.dev/v3"
+DEFAULT_TIMEOUT = 30.0
+
+
+def encode_package_name(name: str) -> str:
+    """
+    URL-encode package names for deps.dev API.
+
+    Scoped packages like @babel/core must be encoded:
+    @babel/core -> %40babel%2Fcore
+    """
+    return quote(name, safe="")
+
+
+def encode_repo_url(url: str) -> str:
+    """
+    Encode repository URL for deps.dev projects endpoint.
+
+    github.com/lodash/lodash -> github.com%2Flodash%2Flodash
+    """
+    return quote(url, safe="")
+
+
+async def retry_with_backoff(
+    func,
+    *args,
+    max_retries: int = 3,
+    base_delay: float = 1.0,
+    **kwargs,
+):
+    """
+    Retry async function with exponential backoff.
+
+    Args:
+        func: Async function to retry
+        max_retries: Maximum number of retry attempts
+        base_delay: Base delay in seconds (doubles each retry)
+    """
+    last_exception = None
+
+    for attempt in range(max_retries):
+        try:
+            return await func(*args, **kwargs)
+        except (httpx.HTTPStatusError, httpx.RequestError) as e:
+            last_exception = e
+            if attempt == max_retries - 1:
+                logger.error(f"Failed after {max_retries} retries: {e}")
+                raise
+
+            delay = base_delay * (2**attempt)
+            logger.warning(f"Attempt {attempt + 1} failed, retrying in {delay}s: {e}")
+            await asyncio.sleep(delay)
+
+    raise last_exception
+
+
+async def get_package_info(name: str, ecosystem: str = "npm") -> dict:
+    """
+    Fetch comprehensive package data from deps.dev.
+
+    Returns:
+        - Version info
+        - Dependencies (direct + transitive count)
+        - Dependents count (who uses this)
+        - Security advisories
+        - License
+        - OpenSSF Scorecard
+        - GitHub repo link
+
+    Raises:
+        httpx.HTTPStatusError: If package not found or API error
+    """
+    encoded_name = encode_package_name(name)
+
+    async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT) as client:
+        # 1. Get package versions
+        pkg_url = f"{DEPSDEV_API}/systems/{ecosystem}/packages/{encoded_name}"
+        pkg_resp = await retry_with_backoff(client.get, pkg_url)
+        pkg_resp.raise_for_status()
+        pkg_data = pkg_resp.json()
+
+        # 2. Get latest version details
+        latest_version = pkg_data.get("defaultVersion", "")
+        if not latest_version:
+            versions = pkg_data.get("versions", [])
+            if versions:
+                latest_version = versions[-1].get("versionKey", {}).get("version", "")
+
+        version_data = {}
+        if latest_version:
+            encoded_version = quote(latest_version, safe="")
+            version_url = f"{DEPSDEV_API}/systems/{ecosystem}/packages/{encoded_name}/versions/{encoded_version}"
+            try:
+                version_resp = await retry_with_backoff(client.get, version_url)
+                version_resp.raise_for_status()
+                version_data = version_resp.json()
+            except httpx.HTTPStatusError as e:
+                logger.warning(f"Could not fetch version data for {name}@{latest_version}: {e}")
+
+        # 3. Get project info (includes OpenSSF score)
+        project_data = {}
+        links = version_data.get("links", [])
+        repo_url = None
+
+        # Find repository link
+        for link in links:
+            if link.get("label") == "SOURCE_REPO":
+                repo_url = link.get("url", "")
+                break
+
+        if repo_url:
+            # Clean up URL for deps.dev project endpoint
+            # e.g., "https://github.com/lodash/lodash" -> "github.com/lodash/lodash"
+            clean_url = repo_url.replace("https://", "").replace("http://", "")
+            if clean_url.endswith(".git"):
+                clean_url = clean_url[:-4]
+
+            encoded_project = encode_repo_url(clean_url)
+            project_url = f"{DEPSDEV_API}/projects/{encoded_project}"
+
+            try:
+                project_resp = await retry_with_backoff(client.get, project_url)
+                project_resp.raise_for_status()
+                project_data = project_resp.json()
+            except httpx.HTTPStatusError:
+                logger.debug(f"Project not found for {name}: {clean_url}")
+
+        # 4. Get dependents count
+        dependents_count = 0
+        try:
+            dependents_url = f"{DEPSDEV_API}/systems/{ecosystem}/packages/{encoded_name}:dependents"
+            dependents_resp = await retry_with_backoff(client.get, dependents_url)
+            dependents_resp.raise_for_status()
+            dependents_data = dependents_resp.json()
+            # deps.dev returns dependentCount as an integer
+            dependent_count_value = dependents_data.get("dependentCount")
+            if isinstance(dependent_count_value, int):
+                dependents_count = dependent_count_value
+            elif isinstance(dependent_count_value, list):
+                dependents_count = len(dependent_count_value)
+        except httpx.HTTPStatusError:
+            logger.debug(f"Could not fetch dependents for {name}")
+
+        # Extract OpenSSF scorecard
+        scorecard = project_data.get("scorecardV2", {})
+        openssf_score = scorecard.get("score")
+        openssf_checks = scorecard.get("check", [])
+
+        return {
+            "name": name,
+            "ecosystem": ecosystem,
+            "latest_version": latest_version,
+            "published_at": version_data.get("publishedAt"),
+            "licenses": version_data.get("licenses", []),
+            "dependencies_direct": len(version_data.get("relations", {}).get("dependencies", [])),
+            "advisories": version_data.get("advisories", []),
+            "repository_url": repo_url,
+            "openssf_score": openssf_score,
+            "openssf_checks": openssf_checks,
+            "stars": project_data.get("starsCount"),
+            "forks": project_data.get("forksCount"),
+            "dependents_count": dependents_count,
+            "source": "deps.dev",
+        }
+
+
+async def get_dependents_count(name: str, ecosystem: str = "npm") -> int:
+    """Get count of packages that depend on this one."""
+    encoded_name = encode_package_name(name)
+
+    async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT) as client:
+        url = f"{DEPSDEV_API}/systems/{ecosystem}/packages/{encoded_name}:dependents"
+        resp = await retry_with_backoff(client.get, url)
+        resp.raise_for_status()
+        data = resp.json()
+
+        # deps.dev returns dependentCount as an integer
+        return data.get("dependentCount", 0)
+
+
+async def get_advisories(name: str, ecosystem: str = "npm") -> list:
+    """Get security advisories for a package."""
+    encoded_name = encode_package_name(name)
+
+    async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT) as client:
+        url = f"{DEPSDEV_API}/systems/{ecosystem}/packages/{encoded_name}:advisories"
+        try:
+            resp = await retry_with_backoff(client.get, url)
+            resp.raise_for_status()
+            data = resp.json()
+            return data.get("advisories", [])
+        except httpx.HTTPStatusError:
+            return []

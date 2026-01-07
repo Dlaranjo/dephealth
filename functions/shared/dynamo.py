@@ -1,0 +1,216 @@
+"""
+DynamoDB helpers for package operations.
+"""
+
+import os
+from datetime import datetime, timezone
+from typing import Optional
+
+import boto3
+from boto3.dynamodb.conditions import Key
+
+dynamodb = boto3.resource("dynamodb")
+PACKAGES_TABLE = os.environ.get("PACKAGES_TABLE", "dephealth-packages")
+
+
+def get_package(ecosystem: str, name: str) -> Optional[dict]:
+    """
+    Get package data from DynamoDB.
+
+    Args:
+        ecosystem: Package ecosystem (e.g., "npm")
+        name: Package name (e.g., "lodash")
+
+    Returns:
+        Package data dict or None if not found
+    """
+    table = dynamodb.Table(PACKAGES_TABLE)
+
+    try:
+        response = table.get_item(Key={"pk": f"{ecosystem}#{name}", "sk": "LATEST"})
+        return response.get("Item")
+    except Exception as e:
+        print(f"Error fetching package {ecosystem}/{name}: {e}")
+        return None
+
+
+def put_package(ecosystem: str, name: str, data: dict, tier: int = 3) -> None:
+    """
+    Store or update package data in DynamoDB.
+
+    Args:
+        ecosystem: Package ecosystem
+        name: Package name
+        data: Package data to store
+        tier: Refresh tier (1=daily, 2=3-day, 3=weekly)
+    """
+    table = dynamodb.Table(PACKAGES_TABLE)
+
+    item = {
+        "pk": f"{ecosystem}#{name}",
+        "sk": "LATEST",
+        "ecosystem": ecosystem,
+        "name": name,
+        "tier": tier,
+        "last_updated": datetime.now(timezone.utc).isoformat(),
+        **data,
+    }
+
+    # Remove None values
+    item = {k: v for k, v in item.items() if v is not None}
+
+    table.put_item(Item=item)
+
+
+def query_packages_by_risk(risk_level: str, limit: int = 100) -> list[dict]:
+    """
+    Query packages by risk level using GSI.
+
+    Args:
+        risk_level: Risk level (CRITICAL, HIGH, MEDIUM, LOW)
+        limit: Maximum number of results
+
+    Returns:
+        List of packages sorted by last_updated (newest first)
+    """
+    table = dynamodb.Table(PACKAGES_TABLE)
+
+    response = table.query(
+        IndexName="risk-level-index",
+        KeyConditionExpression=Key("risk_level").eq(risk_level),
+        ScanIndexForward=False,  # Newest first
+        Limit=limit,
+    )
+
+    return response.get("Items", [])
+
+
+def query_packages_by_tier(tier: int) -> list[dict]:
+    """
+    Query packages by refresh tier using GSI.
+
+    Args:
+        tier: Refresh tier (1, 2, or 3)
+
+    Returns:
+        List of package keys for refresh
+    """
+    table = dynamodb.Table(PACKAGES_TABLE)
+
+    packages = []
+    response = table.query(
+        IndexName="tier-index",
+        KeyConditionExpression=Key("tier").eq(tier),
+        ProjectionExpression="pk",
+    )
+    packages.extend(response.get("Items", []))
+
+    # Handle pagination
+    while "LastEvaluatedKey" in response:
+        response = table.query(
+            IndexName="tier-index",
+            KeyConditionExpression=Key("tier").eq(tier),
+            ProjectionExpression="pk",
+            ExclusiveStartKey=response["LastEvaluatedKey"],
+        )
+        packages.extend(response.get("Items", []))
+
+    return packages
+
+
+def update_package_tier(ecosystem: str, name: str, new_tier: int) -> None:
+    """
+    Update a package's refresh tier.
+
+    Args:
+        ecosystem: Package ecosystem
+        name: Package name
+        new_tier: New tier (1, 2, or 3)
+    """
+    table = dynamodb.Table(PACKAGES_TABLE)
+
+    table.update_item(
+        Key={"pk": f"{ecosystem}#{name}", "sk": "LATEST"},
+        UpdateExpression="SET tier = :tier",
+        ExpressionAttributeValues={":tier": new_tier},
+    )
+
+
+def update_package_scores(
+    ecosystem: str,
+    name: str,
+    health_score: float,
+    risk_level: str,
+    components: dict,
+    confidence: dict,
+    abandonment_risk: dict,
+) -> None:
+    """
+    Update package scores after calculation.
+
+    Args:
+        ecosystem: Package ecosystem
+        name: Package name
+        health_score: Calculated health score (0-100)
+        risk_level: Risk level string
+        components: Score component breakdown
+        confidence: Confidence information
+        abandonment_risk: Abandonment risk calculation
+    """
+    table = dynamodb.Table(PACKAGES_TABLE)
+
+    table.update_item(
+        Key={"pk": f"{ecosystem}#{name}", "sk": "LATEST"},
+        UpdateExpression="""
+            SET health_score = :hs,
+                risk_level = :rl,
+                score_components = :sc,
+                confidence = :conf,
+                abandonment_risk = :ar,
+                scored_at = :now
+        """,
+        ExpressionAttributeValues={
+            ":hs": health_score,
+            ":rl": risk_level,
+            ":sc": components,
+            ":conf": confidence,
+            ":ar": abandonment_risk,
+            ":now": datetime.now(timezone.utc).isoformat(),
+        },
+    )
+
+
+def batch_get_packages(ecosystem: str, names: list[str]) -> dict[str, dict]:
+    """
+    Get multiple packages in a batch operation.
+
+    Args:
+        ecosystem: Package ecosystem
+        names: List of package names
+
+    Returns:
+        Dict mapping package names to their data
+    """
+    if not names:
+        return {}
+
+    table = dynamodb.Table(PACKAGES_TABLE)
+    results = {}
+
+    # DynamoDB batch_get_item supports up to 100 items
+    batch_size = 100
+
+    for i in range(0, len(names), batch_size):
+        batch_names = names[i : i + batch_size]
+        keys = [{"pk": f"{ecosystem}#{name}", "sk": "LATEST"} for name in batch_names]
+
+        response = dynamodb.batch_get_item(
+            RequestItems={PACKAGES_TABLE: {"Keys": keys}}
+        )
+
+        for item in response.get("Responses", {}).get(PACKAGES_TABLE, []):
+            name = item.get("name")
+            if name:
+                results[name] = item
+
+    return results

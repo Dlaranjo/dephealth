@@ -1,0 +1,214 @@
+"""
+Score Package - Lambda handler for calculating and storing scores.
+
+Can be triggered:
+1. After data collection (via SQS/SNS)
+2. On-demand for specific packages
+3. Batch processing for all packages
+"""
+
+import json
+import logging
+import os
+from datetime import datetime, timezone
+
+import boto3
+from boto3.dynamodb.conditions import Key
+
+from health_score import calculate_health_score
+from abandonment_risk import calculate_abandonment_risk
+
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
+
+dynamodb = boto3.resource("dynamodb")
+PACKAGES_TABLE = os.environ.get("PACKAGES_TABLE", "dephealth-packages")
+
+
+def handler(event, context):
+    """
+    Lambda handler for score calculation.
+
+    Event formats:
+    1. Single package: {"ecosystem": "npm", "name": "lodash"}
+    2. SQS batch: {"Records": [...]}
+    3. Recalculate all: {"action": "recalculate_all"}
+    """
+    if "Records" in event:
+        # SQS batch processing
+        return _process_sqs_batch(event)
+    elif event.get("action") == "recalculate_all":
+        # Batch recalculation
+        return _recalculate_all()
+    else:
+        # Single package
+        return _score_single_package(event)
+
+
+def _score_single_package(event: dict) -> dict:
+    """Score a single package."""
+    ecosystem = event.get("ecosystem", "npm")
+    name = event.get("name")
+
+    if not name:
+        return {
+            "statusCode": 400,
+            "body": json.dumps({"error": "Package name is required"}),
+        }
+
+    table = dynamodb.Table(PACKAGES_TABLE)
+
+    # Fetch package data
+    try:
+        response = table.get_item(Key={"pk": f"{ecosystem}#{name}", "sk": "LATEST"})
+        item = response.get("Item")
+
+        if not item:
+            return {
+                "statusCode": 404,
+                "body": json.dumps({"error": f"Package {name} not found"}),
+            }
+    except Exception as e:
+        logger.error(f"Error fetching package: {e}")
+        return {
+            "statusCode": 500,
+            "body": json.dumps({"error": str(e)}),
+        }
+
+    # Calculate scores
+    health_result = calculate_health_score(item)
+    abandonment_result = calculate_abandonment_risk(item)
+
+    # Update package with scores
+    now = datetime.now(timezone.utc).isoformat()
+    try:
+        table.update_item(
+            Key={"pk": f"{ecosystem}#{name}", "sk": "LATEST"},
+            UpdateExpression="""
+                SET health_score = :hs,
+                    risk_level = :rl,
+                    score_components = :sc,
+                    confidence = :conf,
+                    abandonment_risk = :ar,
+                    scored_at = :now
+            """,
+            ExpressionAttributeValues={
+                ":hs": health_result["health_score"],
+                ":rl": health_result["risk_level"],
+                ":sc": health_result["components"],
+                ":conf": health_result["confidence"],
+                ":ar": abandonment_result,
+                ":now": now,
+            },
+        )
+    except Exception as e:
+        logger.error(f"Error updating package scores: {e}")
+        return {
+            "statusCode": 500,
+            "body": json.dumps({"error": str(e)}),
+        }
+
+    return {
+        "statusCode": 200,
+        "body": json.dumps({
+            "package": name,
+            "ecosystem": ecosystem,
+            "health_score": health_result["health_score"],
+            "risk_level": health_result["risk_level"],
+            "components": health_result["components"],
+            "confidence": health_result["confidence"],
+            "abandonment_risk": abandonment_result,
+        }),
+    }
+
+
+def _process_sqs_batch(event: dict) -> dict:
+    """Process a batch of packages from SQS."""
+    successes = 0
+    failures = 0
+
+    for record in event.get("Records", []):
+        try:
+            message = json.loads(record["body"])
+            result = _score_single_package(message)
+
+            if result["statusCode"] == 200:
+                successes += 1
+            else:
+                failures += 1
+                logger.warning(f"Failed to score package: {result}")
+
+        except Exception as e:
+            logger.error(f"Error processing record: {e}")
+            failures += 1
+
+    return {
+        "statusCode": 200,
+        "body": json.dumps({
+            "processed": successes + failures,
+            "successes": successes,
+            "failures": failures,
+        }),
+    }
+
+
+def _recalculate_all() -> dict:
+    """Recalculate scores for all packages."""
+    table = dynamodb.Table(PACKAGES_TABLE)
+
+    recalculated = 0
+    errors = 0
+
+    # Scan all packages - only need pk to extract ecosystem and name
+    response = table.scan(
+        FilterExpression="sk = :latest",
+        ExpressionAttributeValues={":latest": "LATEST"},
+        ProjectionExpression="pk",
+    )
+
+    packages = response.get("Items", [])
+
+    while "LastEvaluatedKey" in response:
+        response = table.scan(
+            FilterExpression="sk = :latest",
+            ExpressionAttributeValues={":latest": "LATEST"},
+            ProjectionExpression="pk",
+            ExclusiveStartKey=response["LastEvaluatedKey"],
+        )
+        packages.extend(response.get("Items", []))
+
+    logger.info(f"Recalculating scores for {len(packages)} packages")
+
+    for pkg in packages:
+        try:
+            # Extract ecosystem and name from pk (format: "ecosystem#name")
+            pk = pkg.get("pk", "")
+            if "#" not in pk:
+                logger.warning(f"Invalid pk format: {pk}")
+                errors += 1
+                continue
+
+            ecosystem, name = pk.split("#", 1)
+
+            result = _score_single_package({
+                "ecosystem": ecosystem,
+                "name": name,
+            })
+
+            if result["statusCode"] == 200:
+                recalculated += 1
+            else:
+                errors += 1
+
+        except Exception as e:
+            logger.error(f"Error recalculating {pkg.get('pk')}: {e}")
+            errors += 1
+
+    return {
+        "statusCode": 200,
+        "body": json.dumps({
+            "recalculated": recalculated,
+            "errors": errors,
+            "total": len(packages),
+        }),
+    }
