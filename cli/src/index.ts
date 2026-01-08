@@ -148,6 +148,10 @@ function printPackageDetails(pkg: PackageHealthFull): void {
   if (signals.active_contributors_90d >= 5) {
     console.log(`  ${pc.green("+")} ${signals.active_contributors_90d} active contributors (90d)`);
   }
+  // Show bus factor if available and healthy
+  if (signals.true_bus_factor && signals.true_bus_factor >= 3) {
+    console.log(`  ${pc.green("+")} Bus factor: ${signals.true_bus_factor} (healthy)`);
+  }
 
   // Negative signals / risk factors
   const riskFactors = pkg.abandonment_risk?.risk_factors ?? [];
@@ -165,6 +169,10 @@ function printPackageDetails(pkg: PackageHealthFull): void {
   if (signals.maintainer_count <= 2 && signals.maintainer_count > 0) {
     console.log(`  ${pc.yellow("!")} Low maintainer count (${signals.maintainer_count})`);
   }
+  // Warning for low bus factor (contribution concentration)
+  if (signals.true_bus_factor && signals.true_bus_factor <= 1) {
+    console.log(`  ${pc.yellow("!")} Single person does 50%+ of commits (bus factor: ${signals.true_bus_factor})`);
+  }
 
   console.log("");
 
@@ -174,6 +182,10 @@ function printPackageDetails(pkg: PackageHealthFull): void {
   console.log(`    Evolution:   ${pkg.components.evolution_health.toFixed(0)}/100`);
   console.log(`    Community:   ${pkg.components.community_health.toFixed(0)}/100`);
   console.log(`    User Impact: ${pkg.components.user_centric.toFixed(0)}/100`);
+  // Security component (new in v2)
+  if (pkg.components.security_health !== undefined) {
+    console.log(`    Security:    ${pkg.components.security_health.toFixed(0)}/100`);
+  }
   console.log("");
 }
 

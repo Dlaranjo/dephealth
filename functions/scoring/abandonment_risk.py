@@ -4,8 +4,11 @@ Abandonment Risk Calculator - Predicts likelihood of package abandonment.
 Uses continuous risk factors with adjustable time horizons.
 """
 
+import logging
 import math
 from typing import Optional
+
+logger = logging.getLogger(__name__)
 
 
 def calculate_abandonment_risk(data: dict, months: int = 12) -> dict:
@@ -25,6 +28,13 @@ def calculate_abandonment_risk(data: dict, months: int = 12) -> dict:
     days = data.get("days_since_last_commit", 365)
     if days is None:
         days = 365
+    # Clamp to non-negative (negative days would break risk calculation)
+    if days < 0:
+        logger.warning(
+            f"Negative days_since_last_commit in abandonment: {days}, clamping to 0"
+        )
+        days = 0
+    days = max(0, days)  # Defense in depth
     inactivity_risk = 1 - math.exp(-days / 180)
 
     # 2. Bus factor risk: exponential decay with contributor count
@@ -60,6 +70,13 @@ def calculate_abandonment_risk(data: dict, months: int = 12) -> dict:
                 published_date = published_date.replace(tzinfo=timezone.utc)
 
             days_since_release = (now - published_date).days
+            # Clamp to non-negative (future dates would break risk calculation)
+            if days_since_release < 0:
+                logger.warning(
+                    f"Negative days_since_release in abandonment: {days_since_release}, clamping to 0"
+                )
+                days_since_release = 0
+            days_since_release = max(0, days_since_release)  # Defense in depth
         except (ValueError, TypeError):
             pass
 

@@ -19,15 +19,24 @@ logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
 # Import from shared module (bundled with Lambda)
-from shared.auth import validate_api_key, increment_usage
+from shared.auth import validate_api_key, check_and_increment_usage
 
 # Demo mode settings
 DEMO_REQUESTS_PER_HOUR = 20
-DEMO_ALLOWED_ORIGINS = [
+# Production CORS origins - localhost only allowed if ALLOW_DEV_CORS is set
+_PROD_ORIGINS = [
     "https://dephealth.laranjo.dev",
+    "https://app.dephealth.laranjo.dev",
+]
+_DEV_ORIGINS = [
     "http://localhost:4321",  # Astro dev server
     "http://localhost:3000",
 ]
+DEMO_ALLOWED_ORIGINS = (
+    _PROD_ORIGINS + _DEV_ORIGINS
+    if os.environ.get("ALLOW_DEV_CORS") == "true"
+    else _PROD_ORIGINS
+)
 
 
 def decimal_default(obj):
@@ -53,27 +62,81 @@ def _get_cors_headers(origin: str) -> dict:
 
 
 def _get_client_ip(event: dict) -> str:
-    """Extract client IP from API Gateway event."""
-    # Try X-Forwarded-For first (set by API Gateway/load balancers)
-    headers = event.get("headers", {})
-    forwarded = headers.get("x-forwarded-for") or headers.get("X-Forwarded-For")
-    if forwarded:
-        # Take the first IP (original client)
-        return forwarded.split(",")[0].strip()
+    """Extract client IP from API Gateway's verified source.
 
-    # Fall back to requestContext
-    request_context = event.get("requestContext", {})
-    identity = request_context.get("identity", {})
-    return identity.get("sourceIp", "unknown")
+    SECURITY: Always use requestContext.identity.sourceIp which is set by
+    API Gateway and cannot be spoofed by clients. Never trust X-Forwarded-For
+    header for rate limiting as it can be forged.
+    """
+    # Use API Gateway's verified source IP (cannot be spoofed)
+    source_ip = event.get("requestContext", {}).get("identity", {}).get("sourceIp")
+    if source_ip:
+        return source_ip
+
+    # Log warning if missing (shouldn't happen with proper API Gateway config)
+    logger.warning("Missing sourceIp in requestContext - possible misconfiguration")
+    return "unknown"
+
+
+def _format_openssf_checks(checks: list) -> dict:
+    """
+    Format OpenSSF checks for API response.
+
+    Highlights key security checks with pass/partial/fail status.
+    """
+    KEY_CHECKS = [
+        "Branch-Protection",
+        "Signed-Releases",
+        "Security-Policy",
+        "Code-Review",
+        "Dependency-Update-Tool",
+        "Vulnerabilities",
+    ]
+
+    result = {
+        "summary": {},
+        "all_checks": [],
+    }
+
+    for check in checks or []:
+        name = check.get("name", "")
+        score = check.get("score", 0)
+
+        result["all_checks"].append({
+            "name": name,
+            "score": score,
+            "reason": check.get("reason", ""),
+        })
+
+        if name in KEY_CHECKS:
+            # Normalize to pass/partial/fail
+            if score >= 8:
+                status = "pass"
+            elif score >= 5:
+                status = "partial"
+            else:
+                status = "fail"
+
+            result["summary"][name] = {
+                "score": score,
+                "status": status,
+            }
+
+    return result
 
 
 def _check_demo_rate_limit(client_ip: str) -> tuple[bool, int]:
     """
-    Check if IP is within demo rate limit.
+    Check if IP is within demo rate limit using atomic conditional update.
+
+    Uses ConditionExpression to atomically check AND increment, preventing
+    race conditions where concurrent requests could exceed the limit.
 
     Returns:
         (allowed, requests_remaining)
     """
+    from botocore.exceptions import ClientError
+
     table = dynamodb.Table(DEMO_RATE_LIMIT_TABLE)
     now = datetime.now(timezone.utc)
     current_hour = now.strftime("%Y-%m-%d-%H")
@@ -81,14 +144,17 @@ def _check_demo_rate_limit(client_ip: str) -> tuple[bool, int]:
     sk = f"hour#{current_hour}"
 
     try:
-        # Atomic increment and get
+        # Atomic check-and-increment using ConditionExpression
+        # This ensures concurrent requests don't exceed the limit
         response = table.update_item(
             Key={"pk": pk, "sk": sk},
             UpdateExpression="SET requests = if_not_exists(requests, :zero) + :inc, #ttl = :ttl",
+            ConditionExpression="attribute_not_exists(requests) OR requests < :limit",
             ExpressionAttributeNames={"#ttl": "ttl"},
             ExpressionAttributeValues={
                 ":zero": 0,
                 ":inc": 1,
+                ":limit": DEMO_REQUESTS_PER_HOUR,
                 ":ttl": int(now.timestamp()) + 7200,  # Expire after 2 hours
             },
             ReturnValues="UPDATED_NEW",
@@ -97,12 +163,21 @@ def _check_demo_rate_limit(client_ip: str) -> tuple[bool, int]:
         current_requests = response.get("Attributes", {}).get("requests", 1)
         remaining = max(0, DEMO_REQUESTS_PER_HOUR - current_requests)
 
-        return current_requests <= DEMO_REQUESTS_PER_HOUR, remaining
+        return True, remaining
+
+    except ClientError as e:
+        if e.response["Error"]["Code"] == "ConditionalCheckFailedException":
+            # Rate limit exceeded - condition check failed
+            return False, 0
+        # Other DynamoDB errors
+        logger.warning(f"Demo rate limit check failed: {e}")
+        # Fail closed for security - deny on error
+        return False, 0
 
     except Exception as e:
         logger.warning(f"Demo rate limit check failed: {e}")
-        # Allow on error, but log it
-        return True, DEMO_REQUESTS_PER_HOUR
+        # Fail closed for security - deny on error
+        return False, 0
 
 
 def handler(event, context):
@@ -123,10 +198,15 @@ def handler(event, context):
     user = validate_api_key(api_key)
     is_demo_mode = False
     demo_remaining = 0
+    authenticated_usage_count = 0
 
     if user:
-        # Authenticated request - check monthly limit
-        if user["requests_this_month"] >= user["monthly_limit"]:
+        # Authenticated request - atomically check limit and increment
+        # This prevents race conditions where concurrent requests exceed the limit
+        allowed, authenticated_usage_count = check_and_increment_usage(
+            user["user_id"], user["key_hash"], user["monthly_limit"]
+        )
+        if not allowed:
             return _rate_limit_response(user, cors_headers)
     else:
         # No valid API key - try demo mode
@@ -178,12 +258,7 @@ def handler(event, context):
             cors_headers,
         )
 
-    # Increment usage counter (only for authenticated requests)
-    if user:
-        try:
-            increment_usage(user["user_id"], user["key_hash"])
-        except Exception as e:
-            logger.warning(f"Failed to increment usage: {e}")
+    # Note: Usage counter already incremented atomically in check_and_increment_usage
 
     # Format response
     response_data = {
@@ -205,7 +280,13 @@ def handler(event, context):
             "is_deprecated": item.get("is_deprecated"),
             "archived": item.get("archived"),
             "openssf_score": item.get("openssf_score"),
+            # True bus factor: contribution distribution analysis
+            # Default to 1 (solo maintainer) and LOW confidence if not calculated
+            "true_bus_factor": item.get("true_bus_factor") or 1,
+            "bus_factor_confidence": item.get("bus_factor_confidence") or "LOW",
         },
+        # OpenSSF checks with pass/partial/fail status
+        "openssf_checks": _format_openssf_checks(item.get("openssf_checks", [])),
         "advisories": item.get("advisories", []),
         "latest_version": item.get("latest_version"),
         "last_published": item.get("last_published"),
@@ -224,9 +305,10 @@ def handler(event, context):
         response_headers["X-RateLimit-Limit"] = str(DEMO_REQUESTS_PER_HOUR)
         response_headers["X-RateLimit-Remaining"] = str(demo_remaining)
     else:
+        # authenticated_usage_count reflects the count AFTER this request was counted
         response_headers["X-RateLimit-Limit"] = str(user["monthly_limit"])
         response_headers["X-RateLimit-Remaining"] = str(
-            user["monthly_limit"] - user["requests_this_month"] - 1
+            max(0, user["monthly_limit"] - authenticated_usage_count)
         )
 
     return {

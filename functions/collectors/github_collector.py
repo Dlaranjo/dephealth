@@ -208,16 +208,55 @@ class GitHubCollector:
 
             # Calculate derived metrics
             unique_committers_90d = 0
+            true_bus_factor = 1
+            bus_factor_confidence = "LOW"
+            contribution_distribution = []
+
             if isinstance(commits, list):
-                committers = set()
+                # Count commits per author (not just unique authors)
+                committers: dict[str, int] = {}
                 for c in commits:
                     if isinstance(c, dict):
                         author = c.get("author")
                         if author and isinstance(author, dict):
                             login = author.get("login")
                             if login:
-                                committers.add(login)
+                                committers[login] = committers.get(login, 0) + 1
+
                 unique_committers_90d = len(committers)
+
+                # Calculate true bus factor: minimum contributors for 50% of commits
+                if committers:
+                    total_commits = sum(committers.values())
+                    sorted_counts = sorted(committers.values(), reverse=True)
+
+                    cumulative = 0
+                    true_bus_factor = 0
+                    for count in sorted_counts:
+                        cumulative += count
+                        true_bus_factor += 1
+                        if cumulative >= total_commits * 0.5:
+                            break
+
+                    # Ensure at least 1
+                    true_bus_factor = max(1, true_bus_factor)
+
+                    # Confidence based on sample size
+                    if total_commits >= 100:
+                        bus_factor_confidence = "HIGH"
+                    elif total_commits >= 30:
+                        bus_factor_confidence = "MEDIUM"
+                    else:
+                        bus_factor_confidence = "LOW"
+
+                    # Top 10 contributors for distribution insight
+                    sorted_contributors = sorted(
+                        committers.items(), key=lambda x: -x[1]
+                    )[:10]
+                    contribution_distribution = [
+                        {"login": login, "commits": count}
+                        for login, count in sorted_contributors
+                    ]
 
             # Days since last commit
             days_since_commit = 999
@@ -236,6 +275,14 @@ class GitHubCollector:
                             days_since_commit = (
                                 datetime.now(timezone.utc) - last_commit
                             ).days
+                            # Clamp at source - future dates should not produce negative days
+                            if days_since_commit < 0:
+                                logger.warning(
+                                    f"Future commit date detected for {owner}/{repo}, "
+                                    f"clamping days_since_commit to 0"
+                                )
+                                days_since_commit = 0
+                            days_since_commit = max(0, days_since_commit)
                         except ValueError as e:
                             logger.warning(f"Could not parse commit date: {e}")
 
@@ -253,6 +300,10 @@ class GitHubCollector:
                 "commits_90d": len(commits) if isinstance(commits, list) else 0,
                 "active_contributors_90d": unique_committers_90d,
                 "total_contributors": len(contributors) if isinstance(contributors, list) else 0,
+                # True bus factor: minimum contributors for 50% of commits
+                "true_bus_factor": true_bus_factor,
+                "bus_factor_confidence": bus_factor_confidence,
+                "contribution_distribution": contribution_distribution,
                 "archived": repo_data.get("archived", False),
                 "disabled": repo_data.get("disabled", False),
                 "default_branch": repo_data.get("default_branch", "main"),

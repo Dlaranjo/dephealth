@@ -76,7 +76,7 @@ async def retry_with_backoff(
     raise last_exception
 
 
-async def get_package_info(name: str, ecosystem: str = "npm") -> dict:
+async def get_package_info(name: str, ecosystem: str = "npm") -> Optional[dict]:
     """
     Fetch comprehensive package data from deps.dev.
 
@@ -88,17 +88,28 @@ async def get_package_info(name: str, ecosystem: str = "npm") -> dict:
         - License
         - OpenSSF Scorecard
         - GitHub repo link
+        - None if package not found (404)
 
     Raises:
-        httpx.HTTPStatusError: If package not found or API error
+        httpx.HTTPStatusError: For API errors other than 404
     """
     encoded_name = encode_package_name(name)
 
     async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT) as client:
         # 1. Get package versions
         pkg_url = f"{DEPSDEV_API}/systems/{ecosystem}/packages/{encoded_name}"
-        pkg_resp = await retry_with_backoff(client.get, pkg_url)
-        pkg_resp.raise_for_status()
+        try:
+            pkg_resp = await retry_with_backoff(client.get, pkg_url)
+            # Handle 404 gracefully - package not found is not an error
+            if pkg_resp.status_code == 404:
+                logger.info(f"Package {name} not found in deps.dev")
+                return None
+            pkg_resp.raise_for_status()
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code == 404:
+                logger.info(f"Package {name} not found in deps.dev")
+                return None
+            raise
         pkg_data = pkg_resp.json()
 
         # 2. Get latest version details

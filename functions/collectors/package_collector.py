@@ -35,6 +35,11 @@ PACKAGES_TABLE = os.environ.get("PACKAGES_TABLE", "dephealth-packages")
 RAW_DATA_BUCKET = os.environ.get("RAW_DATA_BUCKET", "dephealth-raw-data")
 GITHUB_TOKEN_SECRET_ARN = os.environ.get("GITHUB_TOKEN_SECRET_ARN")
 
+# Semaphore to limit concurrent GitHub API calls per Lambda instance
+# With maxConcurrency=10 Lambdas * 5 = max 50 concurrent GitHub calls
+# GitHub allows 5000/hour = ~83/minute, so this keeps us well under the limit
+GITHUB_SEMAPHORE = asyncio.Semaphore(5)
+
 
 def get_github_token() -> Optional[str]:
     """Retrieve GitHub token from Secrets Manager."""
@@ -135,9 +140,11 @@ async def collect_package_data(ecosystem: str, name: str) -> dict:
         if parsed:
             owner, repo = parsed
             try:
-                github_token = get_github_token()
-                github_collector = GitHubCollector(token=github_token)
-                github_data = await github_collector.get_repo_metrics(owner, repo)
+                # Use semaphore to limit concurrent GitHub API calls
+                async with GITHUB_SEMAPHORE:
+                    github_token = get_github_token()
+                    github_collector = GitHubCollector(token=github_token)
+                    github_data = await github_collector.get_repo_metrics(owner, repo)
 
                 if "error" not in github_data:
                     combined_data["github"] = github_data
@@ -156,6 +163,16 @@ async def collect_package_data(ecosystem: str, name: str) -> dict:
                     )
                     combined_data["total_contributors"] = github_data.get(
                         "total_contributors", 0
+                    )
+                    # True bus factor (contribution distribution analysis)
+                    combined_data["true_bus_factor"] = github_data.get(
+                        "true_bus_factor", 1
+                    )
+                    combined_data["bus_factor_confidence"] = github_data.get(
+                        "bus_factor_confidence", "LOW"
+                    )
+                    combined_data["contribution_distribution"] = github_data.get(
+                        "contribution_distribution", []
                     )
                     combined_data["archived"] = github_data.get("archived", False)
                 else:
@@ -231,9 +248,14 @@ def store_package_data(ecosystem: str, name: str, data: dict, tier: int):
         "commits_90d": data.get("commits_90d", 0),
         "active_contributors_90d": data.get("active_contributors_90d", 0),
         "total_contributors": data.get("total_contributors", 0),
+        # True bus factor (contribution distribution analysis)
+        "true_bus_factor": data.get("true_bus_factor"),
+        "bus_factor_confidence": data.get("bus_factor_confidence"),
+        "contribution_distribution": data.get("contribution_distribution", []),
         # Security
         "advisories": data.get("advisories", []),
         "openssf_score": data.get("openssf_score"),
+        "openssf_checks": data.get("openssf_checks", []),
         # Status flags
         "is_deprecated": data.get("is_deprecated", False),
         "archived": data.get("archived", False),
@@ -264,6 +286,67 @@ def store_package_data(ecosystem: str, name: str, data: dict, tier: int):
         raise
 
 
+async def process_single_package(message: dict) -> tuple[bool, str]:
+    """Process a single package message.
+
+    Returns:
+        Tuple of (success: bool, package_name: str)
+    """
+    ecosystem = message["ecosystem"]
+    name = message["name"]
+    tier = message.get("tier", 3)
+
+    logger.info(f"Collecting data for {ecosystem}/{name} (tier {tier})")
+
+    try:
+        # Collect data from all sources
+        data = await collect_package_data(ecosystem, name)
+
+        # Store raw data in S3 for debugging
+        store_raw_data(ecosystem, name, data)
+
+        # Store processed data in DynamoDB
+        store_package_data(ecosystem, name, data, tier)
+
+        return (True, f"{ecosystem}/{name}")
+    except Exception as e:
+        logger.error(f"Failed to process {ecosystem}/{name}: {e}")
+        return (False, f"{ecosystem}/{name}")
+
+
+async def process_batch(records: list) -> tuple[int, int]:
+    """Process a batch of SQS records in parallel.
+
+    Returns:
+        Tuple of (successes, failures)
+    """
+    tasks = []
+    for record in records:
+        try:
+            message = json.loads(record["body"])
+            tasks.append(process_single_package(message))
+        except json.JSONDecodeError as e:
+            logger.error(f"Failed to parse message: {e}")
+
+    # Process all packages in parallel with return_exceptions=True
+    # to prevent one failure from canceling others
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+
+    successes = 0
+    failures = 0
+
+    for result in results:
+        if isinstance(result, Exception):
+            logger.error(f"Task failed with exception: {result}")
+            failures += 1
+        elif isinstance(result, tuple) and result[0]:
+            successes += 1
+        else:
+            failures += 1
+
+    return successes, failures
+
+
 def handler(event, context):
     """
     Lambda handler for package collector.
@@ -275,38 +358,18 @@ def handler(event, context):
         "tier": 1,
         "reason": "daily_refresh"
     }
+
+    Uses asyncio.gather for parallel processing of batch messages.
     """
-    logger.info(f"Processing {len(event.get('Records', []))} messages")
+    records = event.get("Records", [])
+    logger.info(f"Processing {len(records)} messages")
 
-    successes = 0
-    failures = 0
-
-    for record in event.get("Records", []):
-        try:
-            message = json.loads(record["body"])
-            ecosystem = message["ecosystem"]
-            name = message["name"]
-            tier = message.get("tier", 3)
-
-            logger.info(f"Collecting data for {ecosystem}/{name} (tier {tier})")
-
-            # Collect data from all sources
-            # Use asyncio.run() which is the recommended pattern for Python 3.7+
-            # and works correctly in Python 3.12+
-            data = asyncio.run(collect_package_data(ecosystem, name))
-
-            # Store raw data in S3 for debugging
-            store_raw_data(ecosystem, name, data)
-
-            # Store processed data in DynamoDB
-            store_package_data(ecosystem, name, data, tier)
-
-            successes += 1
-
-        except Exception as e:
-            logger.error(f"Failed to process message: {e}")
-            failures += 1
-            # Don't raise - let SQS handle retries via DLQ
+    # Create event loop and process batch
+    loop = asyncio.new_event_loop()
+    try:
+        successes, failures = loop.run_until_complete(process_batch(records))
+    finally:
+        loop.close()
 
     logger.info(f"Completed: {successes} successes, {failures} failures")
 

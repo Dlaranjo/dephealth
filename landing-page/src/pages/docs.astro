@@ -48,7 +48,8 @@ const endpoints = [
     "maintainer_health": 100,
     "evolution_health": 86.5,
     "community_health": 73.7,
-    "user_centric": 69.3
+    "user_centric": 69.3,
+    "security_health": 72.5
   },
   "signals": {
     "weekly_downloads": 37871062,
@@ -59,7 +60,18 @@ const endpoints = [
     "active_contributors_90d": 11,
     "maintainer_count": 5,
     "is_deprecated": false,
-    "archived": false
+    "archived": false,
+    "openssf_score": 7.5,
+    "true_bus_factor": 4,
+    "bus_factor_confidence": "HIGH"
+  },
+  "openssf_checks": {
+    "summary": {
+      "Branch-Protection": {"score": 8, "status": "pass"},
+      "Security-Policy": {"score": 9, "status": "pass"},
+      "Code-Review": {"score": 5, "status": "partial"}
+    },
+    "all_checks": [...]
   },
   "confidence": {
     "score": 87.5,
@@ -90,24 +102,29 @@ const endpoints = [
   -d '{"dependencies": {"express": "^4.0.0"}}' \\
   https://api.dephealth.laranjo.dev/v1/scan`,
       response: `{
-  "summary": {
-    "total_dependencies": 1,
-    "scored": 1,
-    "not_found": 0,
-    "risk_breakdown": {
-      "critical": 0,
-      "high": 0,
-      "medium": 0,
-      "low": 1
-    },
-    "average_health_score": 83.5
-  },
+  "total": 1,
+  "critical": 0,
+  "high": 0,
+  "medium": 0,
+  "low": 1,
   "packages": [
     {
       "package": "express",
+      "ecosystem": "npm",
       "health_score": 83.5,
       "risk_level": "LOW",
-      "abandonment_risk": 3.5
+      "abandonment_risk": {
+        "probability": 3.5,
+        "time_horizon_months": 12,
+        "risk_factors": []
+      },
+      "components": {
+        "maintainer_health": 85.2,
+        "user_centric": 92.1,
+        "evolution_health": 78.4,
+        "community_health": 81.3,
+        "security_health": 72.5
+      }
     }
   ],
   "not_found": []

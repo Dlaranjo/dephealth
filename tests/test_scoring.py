@@ -11,10 +11,12 @@ from freezegun import freeze_time
 
 from scoring.health_score import (
     _calculate_confidence,
+    _calculate_maturity_factor,
     _community_health,
     _evolution_health,
     _get_risk_level,
     _maintainer_health,
+    _security_health,
     _user_centric_health,
     calculate_health_score,
 )
@@ -52,12 +54,13 @@ class TestCalculateHealthScore:
         """Component weights should add up correctly."""
         result = calculate_health_score(sample_healthy_package)
 
-        # Verify components exist
+        # Verify all 5 components exist (v2 added security_health)
         components = result["components"]
         assert "maintainer_health" in components
         assert "user_centric" in components
         assert "evolution_health" in components
         assert "community_health" in components
+        assert "security_health" in components  # v2 addition
 
         # All components should be 0-100
         for name, value in components.items():
@@ -168,44 +171,58 @@ class TestEvolutionHealth:
 
 
 class TestCommunityHealth:
-    """Tests for _community_health component."""
+    """Tests for _community_health component.
 
-    def test_high_openssf_scores_high(self):
-        """High OpenSSF score should contribute positively."""
-        data = {
-            "openssf_score": 9.0,
-            "total_contributors": 100,
-            "advisories": [],
-        }
+    NOTE: In v2, _community_health ONLY uses total_contributors.
+    OpenSSF and advisories moved to _security_health() to avoid double-counting.
+    """
+
+    def test_high_contributors_scores_high(self):
+        """Many contributors should score high."""
+        data = {"total_contributors": 100}
         score = _community_health(data)
 
-        assert score > 0.8
+        # log10(101) / 1.7 ~= 1.18 -> capped at 1.0
+        assert score >= 0.95
 
-    def test_critical_vulnerabilities_reduce_score(self):
-        """Critical vulnerabilities should significantly reduce score."""
-        data_clean = {"openssf_score": 7.0, "total_contributors": 50, "advisories": []}
-        data_vuln = {
-            "openssf_score": 7.0,
-            "total_contributors": 50,
-            "advisories": [
-                {"severity": "CRITICAL"},
-                {"severity": "CRITICAL"},
-            ],
-        }
-
-        score_clean = _community_health(data_clean)
-        score_vuln = _community_health(data_vuln)
-
-        assert score_clean > score_vuln
-        assert score_vuln < 0.6  # Significant penalty for critical vulns
-
-    def test_missing_openssf_uses_neutral(self):
-        """Missing OpenSSF score should use neutral value."""
-        data = {"openssf_score": None, "total_contributors": 10, "advisories": []}
+    def test_low_contributors_scores_low(self):
+        """Few contributors should score lower."""
+        data = {"total_contributors": 2}
         score = _community_health(data)
 
-        # Should use 0.5 for OpenSSF component
-        assert 0.3 <= score <= 0.7
+        # log10(3) / 1.7 ~= 0.28
+        assert 0.2 < score < 0.4
+
+    def test_single_contributor(self):
+        """Single contributor should score low but not zero."""
+        data = {"total_contributors": 1}
+        score = _community_health(data)
+
+        # log10(2) / 1.7 ~= 0.18
+        assert 0.1 < score < 0.3
+
+    def test_missing_contributors_defaults_to_one(self):
+        """Missing total_contributors should default to 1."""
+        data = {}
+        score = _community_health(data)
+
+        # Default = 1, so log10(2) / 1.7 ~= 0.18
+        assert 0.1 < score < 0.3
+
+    def test_none_contributors_defaults_to_one(self):
+        """None total_contributors should default to 1."""
+        data = {"total_contributors": None}
+        score = _community_health(data)
+
+        assert 0.1 < score < 0.3
+
+    def test_zero_contributors_defaults_to_one(self):
+        """Zero contributors should be treated as 1."""
+        data = {"total_contributors": 0}
+        score = _community_health(data)
+
+        # 0 or 1 pattern should give 1
+        assert 0.1 < score < 0.3
 
 
 class TestRiskLevel:
@@ -435,12 +452,12 @@ class TestEdgeCases:
     """Tests for edge cases and error handling."""
 
     def test_negative_days_handled(self):
-        """Negative days should not crash."""
+        """Negative days should be clamped and produce valid score."""
         data = {"days_since_last_commit": -5}
         score = _maintainer_health(data)
 
-        # exp(-0.693 * -5 / 90) > 1, but score should still be valid
-        assert 0 <= score <= 2  # May exceed 1 due to math, but shouldn't crash
+        # AFTER FIX: Negative days are clamped to 0, so score must be bounded 0-1
+        assert 0 <= score <= 1
 
     def test_very_large_downloads(self):
         """Very large download numbers should not overflow."""
@@ -467,3 +484,327 @@ class TestEdgeCases:
         result = calculate_abandonment_risk(data)
 
         assert result["probability"] == 95.0
+
+
+# =============================================================================
+# v2 Scoring System Tests (Maturity, True Bus Factor, Security)
+# =============================================================================
+
+
+class TestMaturityFactor:
+    """Tests for maturity factor calculation (stable packages)."""
+
+    def test_high_adoption_low_activity_gets_bonus(self):
+        """Packages like lodash should get maturity bonus."""
+        data = {
+            "weekly_downloads": 5_000_000,  # High adoption
+            "dependents_count": 10_000,
+            "commits_90d": 2,  # Very low activity
+        }
+        factor = _calculate_maturity_factor(data)
+
+        # Should get a significant maturity factor (0.3-0.7 range)
+        assert factor > 0.3
+        assert factor <= 0.7
+
+    def test_low_adoption_low_activity_no_bonus(self):
+        """Unknown packages with low activity should NOT get bonus."""
+        data = {
+            "weekly_downloads": 100,  # Low adoption
+            "dependents_count": 5,
+            "commits_90d": 2,  # Low activity
+        }
+        factor = _calculate_maturity_factor(data)
+
+        # Should get minimal/no maturity factor
+        assert factor < 0.1
+
+    def test_high_adoption_high_activity_no_bonus(self):
+        """Active packages don't need maturity bonus."""
+        data = {
+            "weekly_downloads": 5_000_000,
+            "dependents_count": 10_000,
+            "commits_90d": 50,  # High activity
+        }
+        factor = _calculate_maturity_factor(data)
+
+        # Activity is high, so maturity factor should be low
+        assert factor < 0.2
+
+    def test_maturity_scales_with_adoption(self):
+        """Higher adoption should yield higher maturity factor."""
+        data_1m = {
+            "weekly_downloads": 1_000_000,
+            "dependents_count": 0,
+            "commits_90d": 0,
+        }
+        data_10m = {
+            "weekly_downloads": 10_000_000,
+            "dependents_count": 0,
+            "commits_90d": 0,
+        }
+
+        factor_1m = _calculate_maturity_factor(data_1m)
+        factor_10m = _calculate_maturity_factor(data_10m)
+
+        assert factor_10m > factor_1m
+
+    def test_dependents_can_trigger_maturity(self):
+        """High dependents should also trigger maturity bonus."""
+        data = {
+            "weekly_downloads": 100,  # Low downloads
+            "dependents_count": 10_000,  # But high dependents
+            "commits_90d": 0,
+        }
+        factor = _calculate_maturity_factor(data)
+
+        assert factor > 0.3
+
+
+class TestTrueBusFactor:
+    """Tests for true bus factor in maintainer health."""
+
+    def test_true_bus_factor_used_when_available(self):
+        """True bus factor should override contributor count."""
+        data = {
+            "days_since_last_commit": 7,
+            "active_contributors_90d": 10,  # Would give high score
+            "true_bus_factor": 1,  # But 1 person does 50% of work
+        }
+        score = _maintainer_health(data)
+
+        # Bus factor of 1 should reduce score significantly
+        # Recency is good (~0.95), but bus factor of 1 ~= 0.27
+        # Score = 0.95 * 0.6 + 0.27 * 0.4 = 0.57 + 0.108 = ~0.68
+        assert 0.5 < score < 0.8
+
+    def test_fallback_to_contributor_count(self):
+        """Should use contributor count if true_bus_factor missing."""
+        data = {
+            "days_since_last_commit": 7,
+            "active_contributors_90d": 5,
+            # No true_bus_factor
+        }
+        score = _maintainer_health(data)
+
+        # Both recency and bus factor should be good
+        assert score > 0.8
+
+    def test_true_bus_factor_zero_fallback(self):
+        """Bus factor of 0 should fall back to contributor count."""
+        data = {
+            "days_since_last_commit": 7,
+            "active_contributors_90d": 5,
+            "true_bus_factor": 0,
+        }
+        score = _maintainer_health(data)
+
+        # Should fall back to active_contributors_90d
+        assert score > 0.8
+
+
+class TestSecurityHealth:
+    """Tests for the new security health component."""
+
+    def test_high_openssf_high_score(self):
+        """High OpenSSF score with no vulnerabilities = high security."""
+        data = {
+            "openssf_score": 9.0,
+            "advisories": [],
+            "openssf_checks": [
+                {"name": "Security-Policy", "score": 10},
+            ],
+        }
+        score = _security_health(data)
+
+        assert score > 0.8
+
+    def test_missing_openssf_penalized(self):
+        """Missing OpenSSF score should be penalized (default 0.3)."""
+        data = {
+            "openssf_score": None,
+            "advisories": [],
+            "openssf_checks": [],
+        }
+        score = _security_health(data)
+
+        # Default OpenSSF = 0.3, no vulns = good, no policy = 0.3
+        # 0.3 * 0.5 + ~0.79 * 0.3 + 0.3 * 0.2 = 0.15 + 0.237 + 0.06 = ~0.45
+        assert 0.3 < score < 0.6
+
+    def test_critical_vulns_reduce_score(self):
+        """Critical vulnerabilities should significantly reduce score."""
+        data = {
+            "openssf_score": 7.0,
+            "advisories": [
+                {"severity": "CRITICAL"},
+                {"severity": "HIGH"},
+            ],
+            "openssf_checks": [],
+        }
+        score = _security_health(data)
+
+        # Critical + High = 3 + 2 = 5 weighted vulns -> low vulnerability score
+        assert score < 0.5
+
+    def test_security_policy_bonus(self):
+        """Having security policy should improve score."""
+        data_with = {
+            "openssf_score": 5.0,
+            "advisories": [],
+            "openssf_checks": [{"name": "Security-Policy", "score": 8}],
+        }
+        data_without = {
+            "openssf_score": 5.0,
+            "advisories": [],
+            "openssf_checks": [],
+        }
+
+        score_with = _security_health(data_with)
+        score_without = _security_health(data_without)
+
+        assert score_with > score_without
+
+
+class TestWeightDistribution:
+    """Tests for v2 component weight distribution."""
+
+    def test_component_weights_sum_to_100(self):
+        """Verify component weights total 100%.
+
+        v2 weights: Maintainer 25%, User-Centric 30%, Evolution 20%,
+        Community 10%, Security 15%
+        """
+        # This test documents the expected weights and verifies they sum correctly
+        expected_weights = {
+            "maintainer_health": 0.25,
+            "user_centric": 0.30,
+            "evolution_health": 0.20,
+            "community_health": 0.10,
+            "security_health": 0.15,
+        }
+        assert sum(expected_weights.values()) == 1.0
+
+        # Verify the weights by checking score calculation
+        # Create data where each component scores exactly 1.0
+        data = {
+            # Maintainer: recent commits + good bus factor
+            "days_since_last_commit": 0,
+            "active_contributors_90d": 10,
+            "true_bus_factor": 10,
+            # User-Centric: very high adoption
+            "weekly_downloads": 100_000_000,
+            "dependents_count": 100_000,
+            "stars": 500_000,
+            # Evolution: recent release + active
+            "last_published": "2026-01-01T00:00:00Z",
+            "commits_90d": 100,
+            # Community: many contributors
+            "total_contributors": 100,
+            # Security: perfect score
+            "openssf_score": 10.0,
+            "advisories": [],
+            "openssf_checks": [{"name": "Security-Policy", "score": 10}],
+        }
+        result = calculate_health_score(data)
+
+        # With all components near 1.0, total should be near 100
+        assert result["health_score"] >= 95
+
+    def test_weights_produce_valid_score(self):
+        """Verify weighted components produce score in valid range."""
+        data = {
+            "days_since_last_commit": 30,
+            "active_contributors_90d": 3,
+            "weekly_downloads": 100_000,
+            "dependents_count": 500,
+            "stars": 5000,
+            "last_published": "2025-12-01T00:00:00Z",
+            "commits_90d": 20,
+            "total_contributors": 10,
+            "openssf_score": 6.0,
+            "advisories": [],
+            "openssf_checks": [],
+        }
+        result = calculate_health_score(data)
+
+        assert 0 <= result["health_score"] <= 100
+        assert len(result["components"]) == 5
+
+    def test_security_component_contributes(self):
+        """Security component should affect overall score."""
+        # Good security
+        data_secure = {
+            "days_since_last_commit": 7,
+            "active_contributors_90d": 5,
+            "weekly_downloads": 1_000_000,
+            "openssf_score": 9.0,
+            "advisories": [],
+            "openssf_checks": [{"name": "Security-Policy", "score": 10}],
+        }
+        # Poor security
+        data_insecure = {
+            "days_since_last_commit": 7,
+            "active_contributors_90d": 5,
+            "weekly_downloads": 1_000_000,
+            "openssf_score": 2.0,
+            "advisories": [
+                {"severity": "CRITICAL"},
+                {"severity": "CRITICAL"},
+            ],
+            "openssf_checks": [],
+        }
+
+        result_secure = calculate_health_score(data_secure)
+        result_insecure = calculate_health_score(data_insecure)
+
+        # Security is 15% of score, so ~15 point difference possible
+        assert result_secure["health_score"] > result_insecure["health_score"]
+        assert result_secure["components"]["security_health"] > result_insecure["components"]["security_health"]
+
+
+class TestScoreBounds:
+    """Tests ensuring scores stay within valid ranges."""
+
+    def test_health_score_bounds_extreme_low(self):
+        """Extreme low case should still be 0-100."""
+        result = calculate_health_score({})
+
+        assert 0 <= result["health_score"] <= 100
+        for name, value in result["components"].items():
+            assert 0 <= value <= 100, f"{name} out of bounds: {value}"
+
+    def test_health_score_bounds_extreme_high(self):
+        """Extreme high case should still be 0-100."""
+        data = {
+            "days_since_last_commit": 0,
+            "active_contributors_90d": 100,
+            "true_bus_factor": 10,
+            "weekly_downloads": 100_000_000,
+            "dependents_count": 100_000,
+            "stars": 500_000,
+            "commits_90d": 1000,
+            "last_published": "2026-01-01T00:00:00Z",
+            "openssf_score": 10.0,
+            "advisories": [],
+            "openssf_checks": [{"name": "Security-Policy", "score": 10}],
+            "total_contributors": 500,
+        }
+        result = calculate_health_score(data)
+
+        assert 0 <= result["health_score"] <= 100
+        for name, value in result["components"].items():
+            assert 0 <= value <= 100, f"{name} out of bounds: {value}"
+
+    def test_negative_inputs_handled(self):
+        """Negative inputs should be clamped and produce valid scores."""
+        data = {
+            "days_since_last_commit": -100,
+            "weekly_downloads": -1000,
+            "commits_90d": -50,
+        }
+        result = calculate_health_score(data)
+
+        assert 0 <= result["health_score"] <= 100
+        for name, value in result["components"].items():
+            assert 0 <= value <= 100, f"{name} out of bounds: {value}"
