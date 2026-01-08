@@ -1,0 +1,12 @@
+[run]
+source = functions
+omit =
+    # Lambda handlers with complex dependencies that require integration testing
+    functions/scoring/score_package.py
+    functions/collectors/refresh_dispatcher.py
+
+[report]
+exclude_lines =
+    pragma: no cover
+    def __repr__
+    raise NotImplementedError
