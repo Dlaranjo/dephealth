@@ -1,65 +1,161 @@
-# DepHealth - Dependency Health Intelligence API
+# DepHealth - Dependency Health Intelligence
 
-Predict which open-source packages are at risk of abandonment, maintenance decline, or becoming problematic - BEFORE issues occur.
+Predict which npm packages are at risk of abandonment, maintenance decline, or security issues — BEFORE problems occur.
 
-**Live Now:**
+**Live:**
 - API: https://api.dephealth.laranjo.dev/v1/
-- Landing Page: https://dephealth.laranjo.dev
-- Documentation: https://dephealth.laranjo.dev/docs
+- Website: https://dephealth.laranjo.dev
+- Docs: https://dephealth.laranjo.dev/docs
+- Methodology: https://dephealth.laranjo.dev/methodology
+
+## Features
+
+- **Health Scores (0-100)** — Quantify package health across 5 dimensions
+- **Abandonment Risk** — Predict probability of abandonment over 12 months
+- **True Bus Factor** — Analyze actual commit distribution, not just contributor count
+- **Security Assessment** — OpenSSF Scorecard integration + vulnerability tracking
+- **CI/CD Integration** — CLI tool and GitHub Action for automated checks
+
+## Quick Start
+
+### CLI
+
+```bash
+# Install globally
+npm install -g @dephealth/cli
+
+# Set your API key
+export DEPHEALTH_API_KEY=dh_your_key_here
+
+# Check a single package
+dephealth check lodash
+
+# Scan your project's dependencies
+dephealth scan
+
+# Fail CI on HIGH/CRITICAL risk packages
+dephealth scan --fail-on HIGH
+```
+
+### GitHub Action
+
+```yaml
+- uses: dephealth/action@v1
+  with:
+    api-key: ${{ secrets.DEPHEALTH_API_KEY }}
+    fail-on: HIGH
+```
+
+### API
+
+```bash
+# Get health score for a package
+curl -H "X-API-Key: dh_your_key" \
+  https://api.dephealth.laranjo.dev/v1/packages/npm/lodash
+
+# Scan multiple packages
+curl -X POST -H "X-API-Key: dh_your_key" \
+  -H "Content-Type: application/json" \
+  -d '{"dependencies": {"lodash": "^4.17.21", "express": "^4.18.0"}}' \
+  https://api.dephealth.laranjo.dev/v1/scan
+```
+
+Get your API key at [dephealth.laranjo.dev](https://dephealth.laranjo.dev)
+
+## Scoring Methodology
+
+Health scores (0-100) are calculated from 5 weighted components:
+
+| Component | Weight | Signals |
+|-----------|--------|---------|
+| **User-Centric** | 30% | Downloads, dependents, stars |
+| **Maintainer Health** | 25% | Commit recency, true bus factor |
+| **Evolution** | 20% | Release recency, commit activity |
+| **Security** | 15% | OpenSSF score, vulnerabilities, security policy |
+| **Community** | 10% | Contributor diversity |
+
+**Risk Levels:** LOW (80-100), MEDIUM (60-79), HIGH (40-59), CRITICAL (0-39)
+
+**Key features:**
+- **Maturity factor** — Stable packages like lodash aren't penalized for low activity
+- **True bus factor** — Minimum contributors needed for 50% of commits
+- **Continuous functions** — Log-scale, exponential decay, and sigmoid functions for smooth, gaming-resistant scores
+
+See [/methodology](https://dephealth.laranjo.dev/methodology) for full details.
+
+## API Endpoints
+
+| Endpoint | Method | Auth | Description |
+|----------|--------|------|-------------|
+| `/health` | GET | No | Health check |
+| `/packages/{ecosystem}/{name}` | GET | API Key | Get package health score |
+| `/scan` | POST | API Key | Scan multiple packages |
+| `/usage` | GET | API Key | Get API usage statistics |
+
+**Demo mode:** Try the API without an API key (20 requests/hour per IP).
+
+## Rate Limits
+
+| Tier | Price | Requests/Month |
+|------|-------|----------------|
+| Free | $0 | 5,000 |
+| Starter | $29 | 25,000 |
+| Pro | $99 | 100,000 |
+| Business | $299 | 500,000 |
 
 ## Project Structure
 
 ```
 dephealth/
-├── functions/               # Lambda functions (Python)
-│   ├── api/                 # API handlers
-│   │   ├── health.py           # GET /health
-│   │   ├── get_package.py      # GET /packages/{ecosystem}/{name}
-│   │   ├── post_scan.py        # POST /scan
-│   │   ├── get_usage.py        # GET /usage
-│   │   └── stripe_webhook.py   # POST /webhooks/stripe
-│   ├── collectors/          # Data collection
-│   │   ├── depsdev_collector.py    # deps.dev API (primary)
-│   │   ├── npm_collector.py        # npm registry API
-│   │   ├── github_collector.py     # GitHub API (rate limited)
-│   │   ├── refresh_dispatcher.py   # EventBridge -> SQS
-│   │   └── package_collector.py    # SQS consumer
-│   ├── scoring/             # Health scoring
-│   │   ├── health_score.py         # Main scoring algorithm
-│   │   ├── abandonment_risk.py     # Abandonment prediction
-│   │   └── score_package.py        # Score calculation Lambda
-│   └── shared/              # Shared utilities
-│       ├── auth.py              # API key auth
-│       ├── dynamo.py            # DynamoDB helpers
-│       └── errors.py            # Error responses
-├── landing-page/            # Astro landing page
-│   ├── src/                 # Astro source files
-│   ├── terraform/           # S3 + CloudFront infrastructure
-│   └── deploy.sh            # Deployment script
+├── functions/               # Python Lambda functions
+│   ├── api/                 # API endpoint handlers
+│   ├── collectors/          # Data collection (deps.dev, npm, GitHub)
+│   ├── scoring/             # Health scoring algorithms
+│   └── shared/              # Auth, DynamoDB helpers
+├── cli/                     # @dephealth/cli - Command line tool
+├── action/                  # @dephealth/action - GitHub Action
+├── packages/
+│   └── api-client/          # @dephealth/api-client - Shared TypeScript client
+├── landing-page/            # Astro website
+│   └── terraform/           # S3 + CloudFront infrastructure
 ├── infrastructure/          # AWS CDK (API infrastructure)
-│   ├── lib/
-│   │   ├── storage-stack.ts    # DynamoDB + S3
-│   │   ├── api-stack.ts        # API Gateway + Lambda
-│   │   └── pipeline-stack.ts   # EventBridge + SQS + Collectors
-│   ├── bin/app.ts
-│   └── cdk.json
+│   └── lib/
+│       ├── storage-stack.ts     # DynamoDB + S3
+│       ├── api-stack.ts         # API Gateway + Lambda + WAF
+│       └── pipeline-stack.ts    # EventBridge + SQS + Collectors
 ├── scripts/                 # Utility scripts
-│   ├── select_packages.py       # Select top 2,500 packages
-│   └── initial_load.py          # Bootstrap data load
-├── tests/                   # Tests
-│   ├── unit/
-│   └── integration/
-└── docs/                    # Documentation
+└── tests/                   # Python tests (pytest)
 ```
 
-## Quick Start
+## Tech Stack
+
+- **Backend:** Python 3.12, AWS Lambda, DynamoDB, API Gateway
+- **CLI/Action:** TypeScript, Commander.js
+- **Website:** Astro, Tailwind CSS
+- **Infrastructure:** AWS CDK, Terraform (landing page)
+- **Data Sources:** deps.dev, npm registry, GitHub API
+
+## Development
 
 ### Prerequisites
 
-- Node.js 18+
+- Node.js 20+
 - Python 3.12+
 - AWS CLI configured
 - AWS CDK CLI (`npm install -g aws-cdk`)
+
+### Run Tests
+
+```bash
+# Python tests
+cd functions
+pip install -r ../tests/requirements.txt
+python -m pytest ../tests/ -v
+
+# CLI tests
+cd cli
+npm test
+```
 
 ### Deploy Infrastructure
 
@@ -72,10 +168,8 @@ cdk deploy --all
 
 ### Set Secrets
 
-After deployment, set the secrets in AWS Secrets Manager:
-
 ```bash
-# GitHub token for API access (plain token string)
+# GitHub token for API access
 aws secretsmanager put-secret-value \
   --secret-id dephealth/github-token \
   --secret-string 'ghp_your_token_here'
@@ -84,125 +178,31 @@ aws secretsmanager put-secret-value \
 aws secretsmanager put-secret-value \
   --secret-id dephealth/stripe-secret \
   --secret-string '{"key":"sk_live_..."}'
-
-aws secretsmanager put-secret-value \
-  --secret-id dephealth/stripe-webhook \
-  --secret-string '{"secret":"whsec_..."}'
-```
-
-### Load Initial Data
-
-```bash
-cd scripts
-pip install -r requirements.txt
-
-# Select top packages
-python select_packages.py --limit 2500 --output packages.json
-
-# Load into DynamoDB (requires GitHub token)
-export GITHUB_TOKEN=ghp_your_token_here
-python initial_load.py --packages packages.json --table dephealth-packages
 ```
 
 ### Deploy Landing Page
 
 ```bash
 cd landing-page
-
-# First time: Initialize Terraform
-cd terraform
-terraform init
-terraform apply
-cd ..
-
-# Deploy (builds and uploads to S3, invalidates CloudFront)
+npm run build
 ./deploy.sh
 ```
 
-## API Endpoints
-
-| Endpoint | Method | Auth | Description |
-|----------|--------|------|-------------|
-| `/health` | GET | No | Health check |
-| `/packages/{ecosystem}/{name}` | GET | API Key | Get package health score |
-| `/scan` | POST | API Key | Scan package.json |
-| `/usage` | GET | API Key | Get API usage stats |
-| `/webhooks/stripe` | POST | Stripe Sig | Handle billing events |
-
-## API Usage
-
-```bash
-# Get health score for lodash
-curl -H "X-API-Key: dh_your_key" \
-  https://api.dephealth.laranjo.dev/v1/packages/npm/lodash
-
-# Scan a package.json
-curl -X POST -H "X-API-Key: dh_your_key" \
-  -H "Content-Type: application/json" \
-  -d '{"content": "{\"dependencies\": {\"lodash\": \"^4.17.21\"}}"}' \
-  https://api.dephealth.laranjo.dev/v1/scan
-```
-
-## Scoring Algorithm
-
-The health score (0-100) is calculated from four components:
-
-| Component | Weight | Signals |
-|-----------|--------|---------|
-| Maintainer Health | 30% | Days since commit, active contributors |
-| User-Centric | 30% | Downloads, dependents, stars |
-| Evolution | 25% | Release recency, commit activity |
-| Community | 15% | OpenSSF score, contributors, security |
-
-All scoring uses continuous functions (log-scale, exponential decay, sigmoid) instead of step functions for smoother, more accurate results.
-
 ## Data Sources
 
-| Source | Rate Limit | Data Provided |
-|--------|------------|---------------|
-| deps.dev | Unlimited | Versions, dependencies, advisories, OpenSSF |
+| Source | Rate Limit | Data |
+|--------|------------|------|
+| deps.dev | Unlimited | Dependencies, advisories, OpenSSF |
 | npm registry | ~1000/hr | Downloads, maintainers, deprecation |
-| GitHub API | 5000/hr | Commits, contributors, stars, forks |
+| GitHub API | 5000/hr | Commits, contributors, stars |
 
-## Refresh Strategy
+## Data Refresh
 
-| Tier | Packages | Frequency | GitHub Calls/Day |
-|------|----------|-----------|------------------|
-| Tier 1 | Top 100 | Daily | ~400 |
-| Tier 2 | Top 500 | Every 3 days | ~533 |
-| Tier 3 | All 2,500 | Weekly | ~1,428 |
-| **Total** | | | **~2,400** |
-
-## Rate Limits
-
-| Tier | Price | Monthly Requests |
-|------|-------|-----------------|
-| Free | $0 | 5,000 |
-| Starter | $29 | 25,000 |
-| Pro | $99 | 100,000 |
-| Business | $299 | 500,000 |
-
-## Development
-
-### Run Tests
-
-```bash
-cd functions
-pip install -r requirements.txt pytest pytest-asyncio
-pytest tests/
-```
-
-### Local Testing
-
-```bash
-# Test collectors locally
-cd functions/collectors
-python -c "
-import asyncio
-from depsdev_collector import get_package_info
-print(asyncio.run(get_package_info('lodash')))
-"
-```
+| Tier | Packages | Frequency |
+|------|----------|-----------|
+| Tier 1 | Top 100 | Daily |
+| Tier 2 | Top 500 | Every 3 days |
+| Tier 3 | All 2,500 | Weekly |
 
 ## License
 
