@@ -3,10 +3,12 @@ import * as apigateway from "aws-cdk-lib/aws-apigateway";
 import * as cloudwatch from "aws-cdk-lib/aws-cloudwatch";
 import * as dynamodb from "aws-cdk-lib/aws-dynamodb";
 import * as events from "aws-cdk-lib/aws-events";
-import * as targets from "aws-cdk-lib/aws-events-targets";
+import * as iam from "aws-cdk-lib/aws-iam";
 import * as lambda from "aws-cdk-lib/aws-lambda";
+import * as logs from "aws-cdk-lib/aws-logs";
 import * as secretsmanager from "aws-cdk-lib/aws-secretsmanager";
 import * as sns from "aws-cdk-lib/aws-sns";
+import * as targets from "aws-cdk-lib/aws-events-targets";
 import * as wafv2 from "aws-cdk-lib/aws-wafv2";
 import * as cw_actions from "aws-cdk-lib/aws-cloudwatch-actions";
 import { Construct } from "constructs";
@@ -58,6 +60,7 @@ export class ApiStack extends cdk.Stack {
           "-c",
           [
             "cp -r /asset-input/api/* /asset-output/",
+            "cp -r /asset-input/shared/* /asset-output/",
             "cp -r /asset-input/shared /asset-output/",
             "pip install -r /asset-input/api/requirements.txt -t /asset-output/ --quiet",
           ].join(" && "),
@@ -73,6 +76,7 @@ export class ApiStack extends cdk.Stack {
       memorySize: 512, // Increased from 256 - doubles vCPU, ~40% faster cold starts
       timeout: cdk.Duration.seconds(30),
       tracing: lambda.Tracing.ACTIVE, // Enable X-Ray tracing
+      logRetention: logs.RetentionDays.TWO_WEEKS, // Prevent unbounded log storage costs
       environment: {
         PACKAGES_TABLE: packagesTable.tableName,
         API_KEYS_TABLE: apiKeysTable.tableName,
@@ -229,7 +233,18 @@ export class ApiStack extends cdk.Stack {
     });
 
     apiKeysTable.grantReadWriteData(signupHandler);
-    // Note: SES permissions need to be granted via IAM policy or identity verification
+
+    // Grant SES permissions for email sending - SCOPED to specific identity
+    const sesPolicy = new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: ["ses:SendEmail", "ses:SendRawEmail"],
+      resources: [
+        // Restrict to specific verified identity only
+        `arn:aws:ses:${this.region}:${this.account}:identity/noreply@dephealth.laranjo.dev`,
+      ],
+    });
+
+    signupHandler.addToRolePolicy(sesPolicy);
 
     // GET /verify - Verify email and create API key
     const verifyHandler = new lambda.Function(this, "VerifyEmailHandler", {
@@ -252,6 +267,7 @@ export class ApiStack extends cdk.Stack {
     });
 
     apiKeysTable.grantReadWriteData(magicLinkHandler);
+    magicLinkHandler.addToRolePolicy(sesPolicy);
 
     // GET /auth/callback - Create session from magic link
     const authCallbackHandler = new lambda.Function(this, "AuthCallbackHandler", {
@@ -332,7 +348,7 @@ export class ApiStack extends cdk.Stack {
         cacheClusterEnabled: true,
         cacheClusterSize: "0.5", // 0.5 GB cache (~$15-20/month)
         cacheTtl: cdk.Duration.minutes(5),
-        // Per-method cache settings (path parameters are included by default)
+        // Per-method cache settings (path parameters must be explicitly added via cacheKeyParameters)
         methodOptions: {
           "/packages/{ecosystem}/{name}/GET": {
             cachingEnabled: true,
@@ -383,7 +399,20 @@ export class ApiStack extends cdk.Stack {
     const packageNameResource = ecosystemResource.addResource("{name}");
     packageNameResource.addMethod(
       "GET",
-      new apigateway.LambdaIntegration(getPackageHandler)
+      new apigateway.LambdaIntegration(getPackageHandler, {
+        // Include path parameters in cache key so different packages get different cache entries
+        cacheKeyParameters: [
+          "method.request.path.ecosystem",
+          "method.request.path.name",
+        ],
+      }),
+      {
+        // Map path parameters for cache key
+        requestParameters: {
+          "method.request.path.ecosystem": true,
+          "method.request.path.name": true,
+        },
+      }
     );
 
     // POST /scan

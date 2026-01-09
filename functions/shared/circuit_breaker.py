@@ -196,3 +196,12 @@ NPM_CIRCUIT = InMemoryCircuitBreaker(
         success_threshold=3,
     )
 )
+
+BUNDLEPHOBIA_CIRCUIT = InMemoryCircuitBreaker(
+    "bundlephobia",
+    CircuitBreakerConfig(
+        failure_threshold=5,
+        timeout_seconds=120,
+        success_threshold=2,
+    )
+)

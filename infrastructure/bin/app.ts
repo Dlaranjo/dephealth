@@ -36,5 +36,7 @@ const apiStack = new ApiStack(app, "DepHealthApi", {
 });
 
 // Add tags to all resources
+const environment = process.env.CDK_ENV || "production";
 cdk.Tags.of(app).add("Project", "DepHealth");
-cdk.Tags.of(app).add("Environment", "production");
+cdk.Tags.of(app).add("Environment", environment);
+cdk.Tags.of(app).add("ManagedBy", "CDK");

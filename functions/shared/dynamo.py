@@ -70,8 +70,8 @@ def put_package(ecosystem: str, name: str, data: dict, tier: int = 3) -> None:
         **data,
     }
 
-    # Remove None values
-    item = {k: v for k, v in item.items() if v is not None}
+    # Remove None values and empty strings (DynamoDB rejects empty strings by default)
+    item = {k: v for k, v in item.items() if v is not None and v != ""}
 
     table.put_item(Item=item)
 

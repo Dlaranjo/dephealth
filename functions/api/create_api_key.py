@@ -29,13 +29,10 @@ API_KEYS_TABLE = os.environ.get("API_KEYS_TABLE", "dephealth-api-keys")
 # Max keys per user
 MAX_KEYS_PER_USER = 5
 
-# Monthly request limits by tier
-TIER_LIMITS = {
-    "free": 5000,
-    "starter": 25000,
-    "pro": 100000,
-    "business": 500000,
-}
+# Import tier limits from shared constants
+import sys
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "../shared"))
+from constants import TIER_LIMITS
 
 
 def handler(event, context):

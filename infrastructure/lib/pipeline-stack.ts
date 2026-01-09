@@ -5,6 +5,7 @@ import * as dynamodb from "aws-cdk-lib/aws-dynamodb";
 import * as events from "aws-cdk-lib/aws-events";
 import * as targets from "aws-cdk-lib/aws-events-targets";
 import * as lambda from "aws-cdk-lib/aws-lambda";
+import * as logs from "aws-cdk-lib/aws-logs";
 import * as s3 from "aws-cdk-lib/aws-s3";
 import * as secretsmanager from "aws-cdk-lib/aws-secretsmanager";
 import * as sns from "aws-cdk-lib/aws-sns";
@@ -73,6 +74,7 @@ export class PipelineStack extends cdk.Stack {
           "-c",
           [
             "cp -r /asset-input/collectors/* /asset-output/",
+            "cp -r /asset-input/shared/* /asset-output/",
             "cp -r /asset-input/shared /asset-output/",
             "pip install -r /asset-input/collectors/requirements.txt -t /asset-output/ --quiet",
           ].join(" && "),
@@ -89,6 +91,7 @@ export class PipelineStack extends cdk.Stack {
           "-c",
           [
             "cp -r /asset-input/scoring/* /asset-output/",
+            "cp -r /asset-input/shared/* /asset-output/",
             "cp -r /asset-input/shared /asset-output/",
             "pip install -r /asset-input/scoring/requirements.txt -t /asset-output/ --quiet",
           ].join(" && "),
@@ -100,6 +103,8 @@ export class PipelineStack extends cdk.Stack {
       runtime: lambda.Runtime.PYTHON_3_12,
       memorySize: 512, // Increased from 256 - doubles vCPU, ~40% faster cold starts
       timeout: cdk.Duration.minutes(2),
+      logRetention: logs.RetentionDays.ONE_MONTH, // Prevent unbounded CloudWatch costs
+      tracing: lambda.Tracing.ACTIVE, // X-Ray tracing for debugging pipeline issues
       environment: {
         PACKAGES_TABLE: packagesTable.tableName,
         RAW_DATA_BUCKET: rawDataBucket.bucketName,

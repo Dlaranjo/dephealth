@@ -73,3 +73,91 @@ def check_usage_alerts(user: dict, current_usage: int) -> Optional[dict]:
         }
 
     return None
+
+
+# External service rate limiting with sharded counters
+import os
+import random
+import boto3
+from botocore.exceptions import ClientError
+
+_dynamodb = None
+RATE_LIMIT_SHARDS = 10
+
+
+def _get_dynamodb():
+    """Get DynamoDB resource, creating it lazily on first use."""
+    global _dynamodb
+    if _dynamodb is None:
+        _dynamodb = boto3.resource("dynamodb")
+    return _dynamodb
+
+
+def check_and_increment_external_rate_limit(
+    service: str, hourly_limit: int, table_name: str = None
+) -> bool:
+    """
+    Check rate limit for external service using atomic sharded counters.
+    Uses per-shard limits with atomic conditional updates to prevent TOCTOU race.
+
+    Args:
+        service: Service name (e.g., "npm", "bundlephobia")
+        hourly_limit: Maximum requests per hour
+        table_name: DynamoDB table name (defaults to API_KEYS_TABLE env var)
+
+    Returns:
+        True if request is allowed, False if rate limited
+    """
+    table = _get_dynamodb().Table(table_name or os.environ.get("API_KEYS_TABLE"))
+    now = datetime.now(timezone.utc)
+    window_key = now.strftime("%Y-%m-%d-%H")
+    shard_id = random.randint(0, RATE_LIMIT_SHARDS - 1)
+
+    # Per-shard limit (distribute evenly + buffer)
+    shard_limit = (hourly_limit // RATE_LIMIT_SHARDS) + 1
+
+    try:
+        # ATOMIC check-and-increment using conditional expression
+        table.update_item(
+            Key={"pk": f"{service}_rate_limit#{shard_id}", "sk": window_key},
+            UpdateExpression="SET calls = if_not_exists(calls, :zero) + :inc, #ttl = :ttl",
+            ConditionExpression="attribute_not_exists(calls) OR calls < :limit",
+            ExpressionAttributeNames={"#ttl": "ttl"},
+            ExpressionAttributeValues={
+                ":zero": 0,
+                ":inc": 1,
+                ":limit": shard_limit,
+                ":ttl": int(now.timestamp()) + 7200,
+            },
+        )
+        return True
+    except ClientError as e:
+        if e.response["Error"]["Code"] == "ConditionalCheckFailedException":
+            # This shard is full, check other shards
+            return _check_any_shard_available(table, service, window_key, shard_limit)
+        raise
+
+
+def _check_any_shard_available(table, service: str, window_key: str, shard_limit: int) -> bool:
+    """Check if any shard has capacity (fallback when random shard is full)."""
+    now = datetime.now(timezone.utc)
+    for shard_id in range(RATE_LIMIT_SHARDS):
+        try:
+            table.update_item(
+                Key={"pk": f"{service}_rate_limit#{shard_id}", "sk": window_key},
+                UpdateExpression="SET calls = if_not_exists(calls, :zero) + :inc, #ttl = :ttl",
+                ConditionExpression="attribute_not_exists(calls) OR calls < :limit",
+                ExpressionAttributeNames={"#ttl": "ttl"},
+                ExpressionAttributeValues={
+                    ":zero": 0,
+                    ":inc": 1,
+                    ":limit": shard_limit,
+                    ":ttl": int(now.timestamp()) + 7200,
+                },
+            )
+            return True
+        except ClientError as e:
+            if e.response["Error"]["Code"] == "ConditionalCheckFailedException":
+                continue
+            raise
+    return False  # All shards at limit

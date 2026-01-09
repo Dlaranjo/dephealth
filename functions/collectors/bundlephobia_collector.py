@@ -17,6 +17,11 @@ from urllib.parse import quote
 
 import httpx
 
+import sys
+import os
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+from shared.circuit_breaker import circuit_breaker, BUNDLEPHOBIA_CIRCUIT
+
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
@@ -65,6 +70,7 @@ async def retry_with_backoff(
     raise last_exception
 
 
+@circuit_breaker(BUNDLEPHOBIA_CIRCUIT)
 async def get_bundle_size(name: str, version: Optional[str] = None) -> dict:
     """
     Fetch bundle size data from Bundlephobia.

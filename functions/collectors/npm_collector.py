@@ -18,6 +18,11 @@ from urllib.parse import quote
 
 import httpx
 
+import sys
+import os
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+from shared.circuit_breaker import circuit_breaker, NPM_CIRCUIT
+
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
@@ -68,6 +73,7 @@ async def retry_with_backoff(
     raise last_exception
 
 
+@circuit_breaker(NPM_CIRCUIT)
 async def get_npm_metadata(name: str) -> dict:
     """
     Fetch npm-specific metadata.
@@ -142,7 +148,7 @@ async def get_npm_metadata(name: str) -> dict:
         if isinstance(repository, str):
             repository_url = repository
         else:
-            repository_url = repository.get("url", "")
+            repository_url = repository.get("url") or None
 
         # Clean up repository URL
         if repository_url:
@@ -174,7 +180,7 @@ async def get_npm_metadata(name: str) -> dict:
             "weekly_downloads": weekly_downloads,
             "repository_url": repository_url,
             "license": data.get("license"),
-            "description": data.get("description", ""),
+            "description": data.get("description") or None,
             "keywords": data.get("keywords", []),
             # TypeScript support
             "has_types": has_types,

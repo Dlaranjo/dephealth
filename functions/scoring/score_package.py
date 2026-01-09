@@ -58,12 +58,12 @@ def handler(event, context):
 
     Event formats:
     1. Single package: {"ecosystem": "npm", "name": "lodash"}
-    2. SQS batch: {"Records": [...]}
+    2. DynamoDB Streams or SQS batch: {"Records": [...]}
     3. Recalculate all: {"action": "recalculate_all"}
     """
     if "Records" in event:
-        # SQS batch processing
-        return _process_sqs_batch(event)
+        # DynamoDB Streams or SQS batch processing
+        return _process_stream_batch(event)
     elif event.get("action") == "recalculate_all":
         # Batch recalculation
         return _recalculate_all()
@@ -171,18 +171,64 @@ def _score_single_package(event: dict) -> dict:
     }
 
 
-def _process_sqs_batch(event: dict) -> dict:
-    """Process a batch of packages from SQS."""
+def _process_stream_batch(event: dict) -> dict:
+    """Process a batch of packages from DynamoDB Streams or SQS."""
     successes = 0
     failures = 0
+    skipped = 0
 
     for record in event.get("Records", []):
         try:
-            message = json.loads(record["body"])
+            # Check if this is a DynamoDB Stream record
+            if "dynamodb" in record:
+                # DynamoDB Streams format
+                event_name = record.get("eventName")
+
+                # Only process INSERT and MODIFY events (not REMOVE)
+                if event_name not in ("INSERT", "MODIFY"):
+                    skipped += 1
+                    continue
+
+                # Get the new image
+                new_image = record.get("dynamodb", {}).get("NewImage", {})
+                if not new_image:
+                    logger.warning("No NewImage in DynamoDB stream record")
+                    skipped += 1
+                    continue
+
+                # Check if this is a collection event (has collected_at but no scored_at change)
+                # This prevents infinite loops - we only score when data is collected
+                old_image = record.get("dynamodb", {}).get("OldImage", {})
+                new_collected_at = new_image.get("collected_at", {}).get("S")
+                old_collected_at = old_image.get("collected_at", {}).get("S") if old_image else None
+
+                # Skip if collected_at hasn't changed (this is a score update, not collection)
+                if event_name == "MODIFY" and new_collected_at == old_collected_at:
+                    logger.debug("Skipping - collected_at unchanged (likely score update)")
+                    skipped += 1
+                    continue
+
+                # Extract ecosystem and name from pk
+                pk = new_image.get("pk", {}).get("S", "")
+                if "#" not in pk:
+                    logger.warning(f"Invalid pk format in stream record: {pk}")
+                    failures += 1
+                    continue
+
+                ecosystem, name = pk.split("#", 1)
+                message = {"ecosystem": ecosystem, "name": name}
+            else:
+                # SQS format (fallback)
+                message = json.loads(record["body"])
+
             result = _score_single_package(message)
 
             if result["statusCode"] == 200:
-                successes += 1
+                body = json.loads(result["body"])
+                if body.get("skipped"):
+                    skipped += 1
+                else:
+                    successes += 1
             else:
                 failures += 1
                 logger.warning(f"Failed to score package: {result}")
@@ -191,11 +237,14 @@ def _process_sqs_batch(event: dict) -> dict:
             logger.error(f"Error processing record: {e}")
             failures += 1
 
+    logger.info(f"Stream processing complete: {successes} scored, {skipped} skipped, {failures} failed")
+
     return {
         "statusCode": 200,
         "body": json.dumps({
-            "processed": successes + failures,
+            "processed": successes + failures + skipped,
             "successes": successes,
+            "skipped": skipped,
             "failures": failures,
         }),
     }

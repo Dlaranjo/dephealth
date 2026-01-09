@@ -24,20 +24,17 @@ API_KEYS_TABLE = os.environ.get("API_KEYS_TABLE", "dephealth-api-keys")
 STRIPE_SECRET_ARN = os.environ.get("STRIPE_SECRET_ARN")
 STRIPE_WEBHOOK_SECRET_ARN = os.environ.get("STRIPE_WEBHOOK_SECRET_ARN")
 
+# Import shared utilities
+import sys
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "../shared"))
+from constants import TIER_LIMITS
+
 # Tier mapping from Stripe price IDs (configured via environment)
 # Use `or` to handle empty string env vars (CDK fallback sets "" when not configured)
 PRICE_TO_TIER = {
     (os.environ.get("STRIPE_PRICE_STARTER") or "price_starter"): "starter",
     (os.environ.get("STRIPE_PRICE_PRO") or "price_pro"): "pro",
     (os.environ.get("STRIPE_PRICE_BUSINESS") or "price_business"): "business",
-}
-
-# Monthly request limits by tier
-TIER_LIMITS = {
-    "free": 5000,
-    "starter": 25000,
-    "pro": 100000,
-    "business": 500000,
 }
 
 

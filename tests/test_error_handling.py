@@ -1142,7 +1142,7 @@ class TestErrorClasses:
 
     def test_error_response_helper_function(self):
         """error_response() helper should produce valid format."""
-        from shared.errors import error_response
+        from shared.response_utils import error_response
 
         response = error_response(
             status_code=422,

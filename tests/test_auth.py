@@ -167,7 +167,8 @@ class TestTierLimits:
     @mock_aws
     def test_tier_limits_correct(self, aws_credentials, mock_dynamodb):
         """Each tier should have correct monthly limit."""
-        from shared.auth import TIER_LIMITS, generate_api_key, validate_api_key
+        from shared.constants import TIER_LIMITS
+        from shared.auth import generate_api_key, validate_api_key
 
         expected_limits = {
             "free": 5000,

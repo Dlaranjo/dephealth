@@ -35,6 +35,37 @@ def aws_credentials():
     os.environ["AWS_REGION"] = "us-east-1"
 
 
+@pytest.fixture(autouse=True)
+def reset_circuit_breakers():
+    """Reset all circuit breaker states between tests to prevent pollution.
+
+    This fixture ensures that circuit breaker state from one test doesn't
+    affect subsequent tests.
+    """
+    # Reset BEFORE test as well
+    _reset_circuits()
+
+    yield  # Let the test run
+
+    # Reset AFTER test
+    _reset_circuits()
+
+
+def _reset_circuits():
+    """Helper to reset all circuit breaker states."""
+    try:
+        from shared.circuit_breaker import (
+            GITHUB_CIRCUIT, NPM_CIRCUIT, DEPSDEV_CIRCUIT, BUNDLEPHOBIA_CIRCUIT,
+            CircuitBreakerState
+        )
+        GITHUB_CIRCUIT._state = CircuitBreakerState()
+        NPM_CIRCUIT._state = CircuitBreakerState()
+        DEPSDEV_CIRCUIT._state = CircuitBreakerState()
+        BUNDLEPHOBIA_CIRCUIT._state = CircuitBreakerState()
+    except ImportError:
+        pass  # Circuit breakers not imported yet
+
+
 @pytest.fixture
 def mock_dynamodb():
     """Provide mocked DynamoDB with tables."""

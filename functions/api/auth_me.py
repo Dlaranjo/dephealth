@@ -14,6 +14,7 @@ import boto3
 from boto3.dynamodb.conditions import Key
 
 from shared.response_utils import decimal_default, error_response
+from shared.constants import TIER_LIMITS
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -84,21 +85,12 @@ def handler(event, context):
             "email": email,
             "tier": user_record.get("tier", "free"),
             "requests_this_month": user_record.get("requests_this_month", 0),
-            "monthly_limit": _get_tier_limit(user_record.get("tier", "free")),
+            "monthly_limit": TIER_LIMITS.get(user_record.get("tier", "free"), TIER_LIMITS["free"]),
             "created_at": user_record.get("created_at"),
             "last_login": user_record.get("last_login"),
         }, default=decimal_default),
     }
 
 
-def _get_tier_limit(tier: str) -> int:
-    """Get monthly limit for tier."""
-    limits = {
-        "free": 5000,
-        "starter": 25000,
-        "pro": 100000,
-        "business": 500000,
-    }
-    return limits.get(tier, 5000)
 
 

@@ -17,6 +17,11 @@ from urllib.parse import quote
 
 import httpx
 
+import sys
+import os
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+from shared.circuit_breaker import circuit_breaker, DEPSDEV_CIRCUIT
+
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
@@ -76,6 +81,7 @@ async def retry_with_backoff(
     raise last_exception
 
 
+@circuit_breaker(DEPSDEV_CIRCUIT)
 async def get_package_info(name: str, ecosystem: str = "npm") -> Optional[dict]:
     """
     Fetch comprehensive package data from deps.dev.
@@ -112,11 +118,18 @@ async def get_package_info(name: str, ecosystem: str = "npm") -> Optional[dict]:
             raise
         pkg_data = pkg_resp.json()
 
-        # 2. Get latest version details
+        # 2. Get default (stable) version - used for dependents count
+        # The defaultVersion field is often null, so we look for isDefault: true
         latest_version = pkg_data.get("defaultVersion", "")
         if not latest_version:
             versions = pkg_data.get("versions", [])
-            if versions:
+            # First, try to find the version marked as default (stable release)
+            for v in versions:
+                if v.get("isDefault"):
+                    latest_version = v.get("versionKey", {}).get("version", "")
+                    break
+            # Fallback to last version if no default found
+            if not latest_version and versions:
                 latest_version = versions[-1].get("versionKey", {}).get("version", "")
 
         version_data = {}
@@ -138,7 +151,7 @@ async def get_package_info(name: str, ecosystem: str = "npm") -> Optional[dict]:
         # Find repository link
         for link in links:
             if link.get("label") == "SOURCE_REPO":
-                repo_url = link.get("url", "")
+                repo_url = link.get("url") or None
                 break
 
         if repo_url:
@@ -158,21 +171,27 @@ async def get_package_info(name: str, ecosystem: str = "npm") -> Optional[dict]:
             except httpx.HTTPStatusError:
                 logger.debug(f"Project not found for {name}: {clean_url}")
 
-        # 4. Get dependents count
+        # 4. Get dependents count (requires version in the endpoint)
         dependents_count = 0
-        try:
-            dependents_url = f"{DEPSDEV_API}/systems/{ecosystem}/packages/{encoded_name}:dependents"
-            dependents_resp = await retry_with_backoff(client.get, dependents_url)
-            dependents_resp.raise_for_status()
-            dependents_data = dependents_resp.json()
-            # deps.dev returns dependentCount as an integer
-            dependent_count_value = dependents_data.get("dependentCount")
-            if isinstance(dependent_count_value, int):
-                dependents_count = dependent_count_value
-            elif isinstance(dependent_count_value, list):
-                dependents_count = len(dependent_count_value)
-        except httpx.HTTPStatusError:
-            logger.debug(f"Could not fetch dependents for {name}")
+        logger.info(f"Fetching dependents for {name}, version={latest_version}")
+        if latest_version:
+            try:
+                encoded_version = quote(latest_version, safe="")
+                dependents_url = f"{DEPSDEV_API}/systems/{ecosystem}/packages/{encoded_name}/versions/{encoded_version}:dependents"
+                logger.info(f"Dependents URL: {dependents_url}")
+                dependents_resp = await retry_with_backoff(client.get, dependents_url)
+                dependents_resp.raise_for_status()
+                dependents_data = dependents_resp.json()
+                logger.info(f"Dependents response: {dependents_data}")
+                # deps.dev returns dependentCount as an integer
+                dependent_count_value = dependents_data.get("dependentCount")
+                if isinstance(dependent_count_value, int):
+                    dependents_count = dependent_count_value
+                elif isinstance(dependent_count_value, list):
+                    dependents_count = len(dependent_count_value)
+                logger.info(f"Final dependents_count for {name}: {dependents_count}")
+            except httpx.HTTPStatusError as e:
+                logger.warning(f"Could not fetch dependents for {name}: {e}")
 
         # Extract OpenSSF scorecard
         scorecard = project_data.get("scorecardV2", {})

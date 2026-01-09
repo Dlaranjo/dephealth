@@ -34,13 +34,8 @@ def _get_dynamodb():
         _dynamodb = boto3.resource("dynamodb")
     return _dynamodb
 
-# Monthly request limits by tier
-TIER_LIMITS = {
-    "free": 5000,
-    "starter": 25000,
-    "pro": 100000,
-    "business": 500000,
-}
+# Import tier limits from constants (single source of truth)
+from .constants import TIER_LIMITS
 
 
 def generate_api_key(user_id: str, tier: str = "free", email: str = None) -> str:

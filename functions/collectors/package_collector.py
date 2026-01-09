@@ -34,6 +34,8 @@ from bundlephobia_collector import get_bundle_size
 import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "../shared"))
 from metrics import emit_metric, emit_batch_metrics
+from circuit_breaker import CircuitOpenError, GITHUB_CIRCUIT
+from rate_limit_utils import check_and_increment_external_rate_limit
 
 dynamodb = boto3.resource("dynamodb")
 s3 = boto3.client("s3")
@@ -291,6 +293,18 @@ async def collect_package_data(ecosystem: str, name: str) -> dict:
         combined_data["dependents_count"] = depsdev_data.get("dependents_count", 0)
         combined_data["repository_url"] = depsdev_data.get("repository_url")
 
+    except CircuitOpenError as e:
+        logger.warning(f"deps.dev circuit open for {ecosystem}/{name}: {e}")
+        combined_data["depsdev_error"] = "circuit_open"
+
+        # Try to use stale data as fallback
+        existing = await _get_existing_package_data(ecosystem, name)
+        if existing and _is_data_acceptable(existing, max_age_days=STALE_DATA_MAX_AGE_DAYS):
+            logger.info(f"Using stale data for {ecosystem}/{name}")
+            combined_data.update(_extract_cached_fields(existing))
+            combined_data["data_freshness"] = "stale"
+            combined_data["stale_reason"] = "deps.dev_circuit_open"
+
     except Exception as e:
         logger.error(f"Failed to fetch deps.dev data for {ecosystem}/{name}: {e}")
         combined_data["depsdev_error"] = str(e)
@@ -305,122 +319,168 @@ async def collect_package_data(ecosystem: str, name: str) -> dict:
 
     # 2. npm and bundlephobia data (run in parallel - they don't depend on each other)
     if ecosystem == "npm":
-        # Start both requests concurrently
-        npm_task = get_npm_metadata(name)
-        bundle_task = get_bundle_size(name)
-        npm_result, bundle_result = await asyncio.gather(
-            npm_task, bundle_task, return_exceptions=True
-        )
+        # Check rate limits before starting requests
+        npm_allowed = check_and_increment_external_rate_limit("npm", 800)  # 80% of 1000
+        bundle_allowed = check_and_increment_external_rate_limit("bundlephobia", 80)  # 80% of 100
 
-        # Process npm result
-        if isinstance(npm_result, Exception):
-            logger.error(f"Failed to fetch npm data for {name}: {npm_result}")
-            combined_data["npm_error"] = str(npm_result)
+        # Only create tasks for allowed services
+        tasks = []
+        if npm_allowed:
+            tasks.append(get_npm_metadata(name))
+        if bundle_allowed:
+            tasks.append(get_bundle_size(name))
+
+        # Gather results (may be empty if both rate limited)
+        if tasks:
+            results = await asyncio.gather(*tasks, return_exceptions=True)
         else:
-            npm_data = npm_result
-            combined_data["npm"] = npm_data
-            combined_data["sources"].append("npm")
+            results = []
 
-            # Supplement with npm-specific data
-            combined_data["weekly_downloads"] = npm_data.get("weekly_downloads", 0)
-            combined_data["maintainers"] = npm_data.get("maintainers", [])
-            combined_data["maintainer_count"] = npm_data.get("maintainer_count", 0)
-            combined_data["is_deprecated"] = npm_data.get("is_deprecated", False)
-            combined_data["deprecation_message"] = npm_data.get("deprecation_message")
-            combined_data["created_at"] = npm_data.get("created_at")
-            combined_data["last_published"] = npm_data.get("last_published")
-            # TypeScript and module system
-            combined_data["has_types"] = npm_data.get("has_types", False)
-            combined_data["module_type"] = npm_data.get("module_type", "commonjs")
-            combined_data["has_exports"] = npm_data.get("has_exports", False)
-            combined_data["engines"] = npm_data.get("engines")
-
-            # Use npm repo URL as fallback
-            if not combined_data.get("repository_url"):
-                combined_data["repository_url"] = npm_data.get("repository_url")
-
-        # Process bundlephobia result
-        if isinstance(bundle_result, Exception):
-            logger.warning(f"Failed to fetch bundle size for {name}: {bundle_result}")
-            combined_data["bundlephobia_error"] = str(bundle_result)
+        # Map results back to services
+        result_idx = 0
+        if npm_allowed:
+            npm_result = results[result_idx] if result_idx < len(results) else None
+            result_idx += 1
         else:
-            bundle_data = bundle_result
-            if "error" not in bundle_data:
-                combined_data["bundlephobia"] = bundle_data
+            npm_result = None
+            logger.warning(f"npm rate limit reached, skipping for {name}")
+            combined_data["npm_error"] = "rate_limit_exceeded"
+
+        if bundle_allowed:
+            bundle_result = results[result_idx] if result_idx < len(results) else None
+        else:
+            bundle_result = None
+            logger.warning(f"Bundlephobia rate limit reached, skipping for {name}")
+            combined_data["bundlephobia_error"] = "rate_limit_exceeded"
+
+        # Process npm result (if we tried to fetch it)
+        if npm_allowed and npm_result is not None:
+            if isinstance(npm_result, CircuitOpenError):
+                logger.warning(f"npm circuit open for {name}")
+                combined_data["npm_error"] = "circuit_open"
+            elif isinstance(npm_result, Exception):
+                logger.error(f"Failed to fetch npm data for {name}: {npm_result}")
+                combined_data["npm_error"] = str(npm_result)
+            else:
+                npm_data = npm_result
+                combined_data["npm"] = npm_data
+                combined_data["sources"].append("npm")
+
+                # Supplement with npm-specific data
+                combined_data["weekly_downloads"] = npm_data.get("weekly_downloads", 0)
+                combined_data["maintainers"] = npm_data.get("maintainers", [])
+                combined_data["maintainer_count"] = npm_data.get("maintainer_count", 0)
+                combined_data["is_deprecated"] = npm_data.get("is_deprecated", False)
+                combined_data["deprecation_message"] = npm_data.get("deprecation_message")
+                combined_data["created_at"] = npm_data.get("created_at")
+                combined_data["last_published"] = npm_data.get("last_published")
+                # TypeScript and module system
+                combined_data["has_types"] = npm_data.get("has_types", False)
+                combined_data["module_type"] = npm_data.get("module_type", "commonjs")
+                combined_data["has_exports"] = npm_data.get("has_exports", False)
+                combined_data["engines"] = npm_data.get("engines")
+
+                # Use npm repo URL as fallback
+                if not combined_data.get("repository_url"):
+                    combined_data["repository_url"] = npm_data.get("repository_url")
+
+        # Process bundlephobia result (if we tried to fetch it)
+        if bundle_allowed and bundle_result is not None:
+            if isinstance(bundle_result, CircuitOpenError):
+                logger.warning(f"Bundlephobia circuit open for {name}")
+                combined_data["bundlephobia_error"] = "circuit_open"
+            elif isinstance(bundle_result, Exception):
+                logger.warning(f"Failed to fetch bundle size for {name}: {bundle_result}")
+                combined_data["bundlephobia_error"] = str(bundle_result)
+            elif "error" not in bundle_result:
+                combined_data["bundlephobia"] = bundle_result
                 combined_data["sources"].append("bundlephobia")
-                combined_data["bundle_size"] = bundle_data.get("size", 0)
-                combined_data["bundle_size_gzip"] = bundle_data.get("gzip", 0)
-                combined_data["bundle_size_category"] = bundle_data.get("size_category")
-                combined_data["bundle_dependency_count"] = bundle_data.get(
+                combined_data["bundle_size"] = bundle_result.get("size", 0)
+                combined_data["bundle_size_gzip"] = bundle_result.get("gzip", 0)
+                combined_data["bundle_size_category"] = bundle_result.get("size_category")
+                combined_data["bundle_dependency_count"] = bundle_result.get(
                     "dependency_count", 0
                 )
             else:
-                combined_data["bundlephobia_error"] = bundle_data.get("error")
+                combined_data["bundlephobia_error"] = bundle_result.get("error")
 
-    # 3. GitHub data (secondary - rate limited)
+    # 3. GitHub data (secondary - rate limited, with circuit breaker)
     repo_url = combined_data.get("repository_url")
     if repo_url:
         parsed = parse_github_url(repo_url)
         if parsed:
             owner, repo = parsed
-            try:
-                # Use semaphore to limit concurrent GitHub API calls per Lambda instance
-                # AND global rate limiter to coordinate across all Lambda instances
-                async with GITHUB_SEMAPHORE:
-                    # Check global rate limit before making GitHub API call
-                    if not _check_and_increment_github_rate_limit():
-                        logger.warning(
-                            f"Skipping GitHub for {ecosystem}/{name} - global rate limit"
-                        )
-                        combined_data["github_error"] = "rate_limit_exceeded"
-                    else:
-                        github_token = get_github_token()
-                        github_collector = GitHubCollector(token=github_token)
-                        github_data = await github_collector.get_repo_metrics(
-                            owner, repo
-                        )
 
-                        if "error" not in github_data:
-                            combined_data["github"] = github_data
-                            combined_data["sources"].append("github")
-
-                            # Supplement with GitHub-specific data
-                            combined_data["stars"] = github_data.get("stars", 0)
-                            combined_data["forks"] = github_data.get("forks", 0)
-                            combined_data["open_issues"] = github_data.get(
-                                "open_issues", 0
+            # Check circuit breaker FIRST (before rate limiting check)
+            if not GITHUB_CIRCUIT.can_execute():
+                logger.warning(f"GitHub circuit open, skipping for {ecosystem}/{name}")
+                combined_data["github_error"] = "circuit_open"
+            else:
+                try:
+                    # Use semaphore to limit concurrent GitHub API calls per Lambda instance
+                    # AND global rate limiter to coordinate across all Lambda instances
+                    async with GITHUB_SEMAPHORE:
+                        # Check global rate limit before making GitHub API call
+                        if not _check_and_increment_github_rate_limit():
+                            logger.warning(
+                                f"Skipping GitHub for {ecosystem}/{name} - global rate limit"
                             )
-                            combined_data["days_since_last_commit"] = github_data.get(
-                                "days_since_last_commit"
-                            )
-                            combined_data["commits_90d"] = github_data.get(
-                                "commits_90d", 0
-                            )
-                            combined_data["active_contributors_90d"] = github_data.get(
-                                "active_contributors_90d", 0
-                            )
-                            combined_data["total_contributors"] = github_data.get(
-                                "total_contributors", 0
-                            )
-                            # True bus factor (contribution distribution analysis)
-                            combined_data["true_bus_factor"] = github_data.get(
-                                "true_bus_factor", 1
-                            )
-                            combined_data["bus_factor_confidence"] = github_data.get(
-                                "bus_factor_confidence", "LOW"
-                            )
-                            combined_data[
-                                "contribution_distribution"
-                            ] = github_data.get("contribution_distribution", [])
-                            combined_data["archived"] = github_data.get(
-                                "archived", False
-                            )
+                            combined_data["github_error"] = "rate_limit_exceeded"
                         else:
-                            combined_data["github_error"] = github_data["error"]
+                            github_token = get_github_token()
+                            github_collector = GitHubCollector(token=github_token)
+                            github_data = await github_collector.get_repo_metrics(
+                                owner, repo
+                            )
 
-            except Exception as e:
-                logger.error(f"Failed to fetch GitHub data for {owner}/{repo}: {e}")
-                combined_data["github_error"] = str(e)
+                            if "error" not in github_data:
+                                # Record success for circuit breaker
+                                GITHUB_CIRCUIT.record_success()
+
+                                combined_data["github"] = github_data
+                                combined_data["sources"].append("github")
+
+                                # Supplement with GitHub-specific data
+                                combined_data["stars"] = github_data.get("stars", 0)
+                                combined_data["forks"] = github_data.get("forks", 0)
+                                combined_data["open_issues"] = github_data.get(
+                                    "open_issues", 0
+                                )
+                                combined_data["days_since_last_commit"] = github_data.get(
+                                    "days_since_last_commit"
+                                )
+                                combined_data["commits_90d"] = github_data.get(
+                                    "commits_90d", 0
+                                )
+                                combined_data["active_contributors_90d"] = github_data.get(
+                                    "active_contributors_90d", 0
+                                )
+                                combined_data["total_contributors"] = github_data.get(
+                                    "total_contributors", 0
+                                )
+                                # True bus factor (contribution distribution analysis)
+                                combined_data["true_bus_factor"] = github_data.get(
+                                    "true_bus_factor", 1
+                                )
+                                combined_data["bus_factor_confidence"] = github_data.get(
+                                    "bus_factor_confidence", "LOW"
+                                )
+                                combined_data[
+                                    "contribution_distribution"
+                                ] = github_data.get("contribution_distribution", [])
+                                combined_data["archived"] = github_data.get(
+                                    "archived", False
+                                )
+                            else:
+                                # Record failure for circuit breaker (API returned error)
+                                GITHUB_CIRCUIT.record_failure()
+                                combined_data["github_error"] = github_data["error"]
+
+                except Exception as e:
+                    # Record failure for circuit breaker
+                    GITHUB_CIRCUIT.record_failure(e)
+                    logger.error(f"Failed to fetch GitHub data for {owner}/{repo}: {e}")
+                    combined_data["github_error"] = str(e)
 
     # Note: Bundlephobia is now fetched in parallel with npm data in section 2
 
@@ -499,8 +559,8 @@ def store_package_data(ecosystem: str, name: str, data: dict, tier: int):
         "stale_reason": data.get("stale_reason"),
     }
 
-    # Remove None values (DynamoDB doesn't like them)
-    item = {k: v for k, v in item.items() if v is not None}
+    # Remove None values and empty strings (DynamoDB rejects both by default)
+    item = {k: v for k, v in item.items() if v is not None and v != ""}
 
     try:
         table.put_item(Item=item)

@@ -27,6 +27,7 @@ from moto import mock_aws
 # Add functions directories to path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "functions"))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "functions", "collectors"))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "functions", "shared"))
 
 
 # =============================================================================
@@ -764,7 +765,7 @@ class TestGetPackageInfo:
 
         def mock_handler(request: httpx.Request) -> httpx.Response:
             url = str(request.url)
-            if "packages/lodash:dependents" in url:
+            if "packages/lodash/versions/4.17.21:dependents" in url:
                 return httpx.Response(200, json={"dependentCount": 150000})
             elif "packages/lodash/versions/4.17.21" in url:
                 return httpx.Response(
@@ -1288,7 +1289,8 @@ class TestCollectPackageData:
             },
         ):
             with patch.object(httpx.AsyncClient, "__init__", patched_init), \
-                 patch("package_collector._check_and_increment_github_rate_limit", return_value=True):
+                 patch("package_collector._check_and_increment_github_rate_limit", return_value=True), \
+                 patch("package_collector.check_and_increment_external_rate_limit", return_value=True):
                 from package_collector import collect_package_data
 
                 result = run_async(collect_package_data("npm", "lodash"))
@@ -1348,9 +1350,11 @@ class TestCollectPackageData:
                 "PACKAGES_TABLE": "dephealth-packages",
                 "RAW_DATA_BUCKET": "dephealth-raw-data",
                 "GITHUB_TOKEN_SECRET_ARN": "",
+                "API_KEYS_TABLE": "dephealth-api-keys",
             },
         ):
-            with patch.object(httpx.AsyncClient, "__init__", patched_init):
+            with patch.object(httpx.AsyncClient, "__init__", patched_init), \
+                 patch("rate_limit_utils.check_and_increment_external_rate_limit", return_value=True):
                 from importlib import reload
                 import package_collector
                 reload(package_collector)
@@ -1522,9 +1526,11 @@ class TestHandler:
                 "PACKAGES_TABLE": "dephealth-packages",
                 "RAW_DATA_BUCKET": "dephealth-raw-data",
                 "GITHUB_TOKEN_SECRET_ARN": "",
+                "API_KEYS_TABLE": "dephealth-api-keys",
             },
         ):
-            with patch.object(httpx.AsyncClient, "__init__", patched_init):
+            with patch.object(httpx.AsyncClient, "__init__", patched_init), \
+                 patch("rate_limit_utils.check_and_increment_external_rate_limit", return_value=True):
                 from importlib import reload
 
                 import package_collector
