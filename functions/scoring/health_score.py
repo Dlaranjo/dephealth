@@ -19,34 +19,6 @@ from typing import Optional
 
 logger = logging.getLogger(__name__)
 
-# Known bot account patterns that should be filtered from activity metrics
-BOT_PATTERNS = [
-    "dependabot",
-    "renovate",
-    "greenkeeper",
-    "snyk-bot",
-    "github-actions",
-    "semantic-release",
-    "release-please",
-]
-
-
-def _filter_bot_commits(commits: list) -> list:
-    """
-    Filter out commits from known bot accounts.
-
-    Args:
-        commits: List of commit dictionaries with 'author' field
-
-    Returns:
-        Filtered list without bot commits
-    """
-    return [
-        c
-        for c in commits
-        if not any(bot in c.get("author", "").lower() for bot in BOT_PATTERNS)
-    ]
-
 
 def calculate_health_score(data: dict) -> dict:
     """
@@ -109,6 +81,12 @@ def _issue_response_score(data: dict) -> float:
     Moderate response (24-72h) = 0.7-1.0 (linear decay)
     Slow response (> 72h) = exponential decay
     No data = 0.5 (neutral)
+
+    NOTE: Response times are currently estimated using heuristics:
+    - Closed issues with comments: assumed 24h average response
+    - Open issues with comments: assumed 48h average response
+    This is a simplification to avoid additional GitHub API calls.
+    Future enhancement: fetch actual response times from GitHub Timeline API.
     """
     avg_response_hours = data.get("avg_issue_response_hours")
     if avg_response_hours is None:

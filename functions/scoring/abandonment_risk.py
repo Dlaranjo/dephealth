@@ -20,11 +20,22 @@ def _calculate_time_adjusted_risk(base_risk: float, months: int) -> float:
 
     Args:
         base_risk: Base risk score (0-1)
-        months: Time horizon in months
+        months: Time horizon in months (must be >= 1)
 
     Returns:
         Time-adjusted risk probability (0-0.95)
+
+    Raises:
+        ValueError: If months < 1
     """
+    # Input validation
+    if not 0 <= base_risk <= 1:
+        logger.warning(f"base_risk {base_risk} out of [0,1] range, clamping")
+        base_risk = max(0.0, min(1.0, base_risk))
+
+    if months < 1:
+        raise ValueError(f"months must be >= 1, got {months}")
+
     # Parameters would ideally be fit from historical data
     k = 1.5  # Shape parameter (k > 1 = increasing failure rate)
     lambda_ = 18  # Scale parameter (median time to abandonment in months)

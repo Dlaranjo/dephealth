@@ -341,6 +341,8 @@ class GitHubCollector:
                             logger.warning(f"Could not parse commit date: {e}")
 
             # Calculate issue response time
+            # NOTE: This uses heuristic estimation rather than actual response times
+            # to avoid additional GitHub API calls (Timeline API requires +1 call per issue)
             avg_issue_response_hours = None
             if isinstance(issues, list):
                 # Filter out PRs (GitHub API returns PRs as issues)
@@ -352,10 +354,11 @@ class GitHubCollector:
                     # Check if issue has comments (indicates response)
                     comments = issue.get("comments", 0)
                     if created_at and comments > 0:
-                        # For simplicity, we'll use a heuristic:
-                        # If issue has comments, assume first response within 48 hours
-                        # This is a simplification - ideally we'd fetch /issues/:number/timeline
-                        # but that would require additional API calls per issue
+                        # HEURISTIC ESTIMATION (not actual response time):
+                        # - Closed issues with comments: assume 24h average response
+                        # - Open issues with comments: assume 48h average response
+                        # TODO: Fetch actual response times using GitHub Timeline API
+                        # (would require: GET /repos/{owner}/{repo}/issues/{issue_number}/timeline)
                         try:
                             created = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
                             # Use issue state change as proxy for response

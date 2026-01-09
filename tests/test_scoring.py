@@ -14,7 +14,6 @@ from scoring.health_score import (
     _calculate_maturity_factor,
     _community_health,
     _evolution_health,
-    _filter_bot_commits,
     _get_risk_level,
     _issue_response_score,
     _maintainer_health,
@@ -1686,49 +1685,6 @@ class TestPRVelocityScore:
             prev_score = score
 
 
-class TestBotCommitFiltering:
-    """Tests for _filter_bot_commits - Bot commit filtering."""
-
-    def test_filters_dependabot(self):
-        """Should filter out dependabot commits."""
-        commits = [
-            {"author": "dependabot[bot]"},
-            {"author": "real-user"},
-        ]
-        filtered = _filter_bot_commits(commits)
-        assert len(filtered) == 1
-        assert filtered[0]["author"] == "real-user"
-
-    def test_filters_multiple_bots(self):
-        """Should filter out multiple bot types."""
-        commits = [
-            {"author": "dependabot[bot]"},
-            {"author": "renovate[bot]"},
-            {"author": "github-actions[bot]"},
-            {"author": "real-user"},
-        ]
-        filtered = _filter_bot_commits(commits)
-        assert len(filtered) == 1
-
-    def test_case_insensitive(self):
-        """Bot filtering should be case insensitive."""
-        commits = [
-            {"author": "DEPENDABOT[bot]"},
-            {"author": "real-user"},
-        ]
-        filtered = _filter_bot_commits(commits)
-        assert len(filtered) == 1
-
-    def test_no_bots_returns_all(self):
-        """Should return all commits if no bots."""
-        commits = [
-            {"author": "user1"},
-            {"author": "user2"},
-        ]
-        filtered = _filter_bot_commits(commits)
-        assert len(filtered) == 2
-
-
 class TestWeibullRiskCalculation:
     """Tests for _calculate_time_adjusted_risk - Weibull survival analysis."""
 
@@ -1754,12 +1710,25 @@ class TestWeibullRiskCalculation:
 
         assert risk_100m <= 0.95
 
-    def test_zero_months_returns_low_risk(self):
-        """Zero time horizon should return near-zero risk."""
+    def test_zero_months_raises_value_error(self):
+        """Zero or negative months should raise ValueError."""
         base_risk = 0.5
-        risk_0m = _calculate_time_adjusted_risk(base_risk, 0)
 
-        assert risk_0m < 0.1
+        # months=0 should raise ValueError
+        with pytest.raises(ValueError, match="months must be >= 1"):
+            _calculate_time_adjusted_risk(base_risk, 0)
+
+        # negative months should also raise ValueError
+        with pytest.raises(ValueError, match="months must be >= 1"):
+            _calculate_time_adjusted_risk(base_risk, -5)
+
+    def test_one_month_returns_low_risk(self):
+        """One month time horizon should return low risk."""
+        base_risk = 0.5
+        risk_1m = _calculate_time_adjusted_risk(base_risk, 1)
+
+        # 1 month should be very low risk
+        assert risk_1m < 0.1
 
 
 class TestConfidenceIntervals:
