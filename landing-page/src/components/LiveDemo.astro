@@ -18,14 +18,21 @@ const popularPackages = ['express', 'lodash', 'react', 'webpack', 'axios', 'type
   <!-- Demo Input -->
   <div class="max-w-2xl">
     <div class="flex flex-col sm:flex-row gap-3 mb-4">
+      <label for="package-input" class="sr-only">Package name</label>
       <input
         type="text"
         id="package-input"
+        aria-label="Enter npm package name"
+        aria-describedby="package-hint"
         placeholder="Enter package name (e.g., express)"
         class="flex-1 px-5 py-4 text-base bg-[#111113] border border-[#1a1a1f] rounded-xl text-white placeholder-zinc-500 focus:border-blue-500/50 focus:outline-none transition-all"
       />
+      <p id="package-hint" class="sr-only">
+        Enter an npm package name to check its health score
+      </p>
       <button
         id="check-btn"
+        aria-busy="false"
         class="btn-gradient px-7 py-4 text-base font-semibold text-white rounded-xl whitespace-nowrap"
       >
         Check Health
@@ -166,6 +173,7 @@ const popularPackages = ['express', 'lodash', 'react', 'webpack', 'axios', 'type
   async function checkPackage(packageName: string) {
     if (!packageName.trim()) return;
 
+    checkBtn?.setAttribute('aria-busy', 'true');
     results?.classList.add('hidden');
     error?.classList.add('hidden');
     loading?.classList.remove('hidden');
@@ -175,6 +183,7 @@ const popularPackages = ['express', 'lodash', 'react', 'webpack', 'axios', 'type
       const data = await res.json();
 
       loading?.classList.add('hidden');
+      checkBtn?.setAttribute('aria-busy', 'false');
 
       if (data.error) {
         error?.classList.remove('hidden');
@@ -226,6 +235,7 @@ const popularPackages = ['express', 'lodash', 'react', 'webpack', 'axios', 'type
 
     } catch (e) {
       loading?.classList.add('hidden');
+      checkBtn?.setAttribute('aria-busy', 'false');
       error?.classList.remove('hidden');
       const errorMsg = document.getElementById('error-message');
       if (errorMsg) errorMsg.textContent = 'Failed to fetch package data';
