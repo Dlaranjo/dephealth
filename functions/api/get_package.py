@@ -11,7 +11,6 @@ import logging
 import os
 from datetime import datetime, timezone
 from decimal import Decimal
-from typing import Optional
 
 import boto3
 from boto3.dynamodb.conditions import Key
@@ -22,6 +21,7 @@ logger.setLevel(logging.INFO)
 # Import from shared module (bundled with Lambda)
 from shared.auth import validate_api_key, check_and_increment_usage
 from shared.response_utils import decimal_default, error_response
+from shared.rate_limit_utils import check_usage_alerts, get_reset_timestamp
 
 # Demo mode settings
 DEMO_REQUESTS_PER_HOUR = 20
@@ -119,50 +119,6 @@ def _format_openssf_checks(checks: list) -> dict:
             }
 
     return result
-
-
-def get_reset_timestamp() -> int:
-    """Get Unix timestamp for start of next month (when usage resets)."""
-    now = datetime.now(timezone.utc)
-
-    # First day of next month
-    if now.month == 12:
-        next_month = datetime(now.year + 1, 1, 1, tzinfo=timezone.utc)
-    else:
-        next_month = datetime(now.year, now.month + 1, 1, tzinfo=timezone.utc)
-
-    return int(next_month.timestamp())
-
-
-def check_usage_alerts(user: dict, current_usage: int) -> Optional[dict]:
-    """
-    Check if user is approaching rate limit and return alert info.
-
-    Returns dict with alert level and message if applicable, None otherwise.
-    """
-    limit = user.get("monthly_limit", 5000)
-    usage_percent = (current_usage / limit) * 100 if limit > 0 else 100
-
-    if usage_percent >= 100:
-        return {
-            "level": "exceeded",
-            "percent": 100,
-            "message": f"Monthly limit exceeded. Upgrade at https://dephealth.laranjo.dev/pricing",
-        }
-    elif usage_percent >= 95:
-        return {
-            "level": "critical",
-            "percent": round(usage_percent, 1),
-            "message": f"Only {limit - current_usage} requests remaining this month",
-        }
-    elif usage_percent >= 80:
-        return {
-            "level": "warning",
-            "percent": round(usage_percent, 1),
-            "message": f"{round(100 - usage_percent, 1)}% of monthly quota remaining",
-        }
-
-    return None
 
 
 def _check_demo_rate_limit(client_ip: str) -> tuple[bool, int]:
