@@ -39,6 +39,12 @@ MAGIC_LINK_TTL_MINUTES = 15
 MIN_RESPONSE_TIME_SECONDS = 1.5
 
 
+def _get_origin(event: dict) -> str | None:
+    """Extract Origin header from request (case-insensitive)."""
+    headers = event.get("headers", {}) or {}
+    return headers.get("origin") or headers.get("Origin")
+
+
 def handler(event, context):
     """
     Lambda handler for POST /auth/magic-link.
@@ -55,6 +61,7 @@ def handler(event, context):
     to prevent timing-based enumeration.
     """
     start_time = time.time()
+    origin = _get_origin(event)
 
     # Generic success message - same whether email exists or not
     success_message = "If an account exists with this email, a login link has been sent."
@@ -64,13 +71,13 @@ def handler(event, context):
         body = json.loads(event.get("body", "{}"))
     except json.JSONDecodeError:
         # Validation errors can return early - they don't reveal email existence
-        return error_response(400, "invalid_json", "Request body must be valid JSON")
+        return error_response(400, "invalid_json", "Request body must be valid JSON", origin=origin)
 
     email = body.get("email", "").strip().lower()
 
     # Validate email format
     if not email or not EMAIL_REGEX.match(email):
-        return error_response(400, "invalid_email", "Please provide a valid email address")
+        return error_response(400, "invalid_email", "Please provide a valid email address", origin=origin)
 
     # Check if user exists and is verified
     table = dynamodb.Table(API_KEYS_TABLE)
@@ -91,13 +98,13 @@ def handler(event, context):
         if not verified_user:
             # Don't reveal whether email exists - same response as success
             logger.info(f"Magic link requested for non-existent email: {email}")
-            return _timed_response(start_time, success_response({"message": success_message}))
+            return _timed_response(start_time, success_response({"message": success_message}, origin=origin))
 
     except Exception as e:
         logger.error(f"Error checking user: {e}")
         return _timed_response(
             start_time,
-            error_response(500, "internal_error", "Failed to process request"),
+            error_response(500, "internal_error", "Failed to process request", origin=origin),
         )
 
     user_id = verified_user["pk"]
@@ -121,7 +128,7 @@ def handler(event, context):
         logger.error(f"Error storing magic token: {e}")
         return _timed_response(
             start_time,
-            error_response(500, "internal_error", "Failed to generate login link"),
+            error_response(500, "internal_error", "Failed to generate login link", origin=origin),
         )
 
     # Send magic link email
@@ -132,12 +139,12 @@ def handler(event, context):
         logger.error(f"Failed to send magic link email: {e}")
         return _timed_response(
             start_time,
-            error_response(500, "internal_error", "Failed to send login email"),
+            error_response(500, "internal_error", "Failed to send login email", origin=origin),
         )
 
     logger.info(f"Magic link sent to {email}")
 
-    return _timed_response(start_time, success_response({"message": success_message}))
+    return _timed_response(start_time, success_response({"message": success_message}, origin=origin))
 
 
 def _send_magic_link_email(email: str, magic_url: str):
