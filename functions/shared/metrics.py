@@ -10,7 +10,6 @@ from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
 import boto3
-from botocore.exceptions import ClientError
 
 logger = logging.getLogger(__name__)
 
@@ -61,7 +60,7 @@ def emit_metric(
             extra={"dimensions": dimensions},
         )
 
-    except ClientError as e:
+    except Exception as e:
         # Don't fail the Lambda if metrics fail
         logger.warning(f"Failed to emit metric {metric_name}: {e}")
 
@@ -112,7 +111,7 @@ def emit_batch_metrics(metrics: list[Dict[str, Any]]) -> None:
 
         logger.debug(f"Emitted {len(metric_data)} metrics in batch")
 
-    except ClientError as e:
+    except Exception as e:
         # Don't fail the Lambda if metrics fail
         logger.warning(f"Failed to emit batch metrics: {e}")
 

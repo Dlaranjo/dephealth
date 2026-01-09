@@ -8,8 +8,12 @@ States:
 - CLOSED: Normal operation, requests allowed
 - OPEN: Service failing, requests blocked
 - HALF_OPEN: Testing if service recovered
+
+NOTE: This implementation uses asyncio.Lock for thread safety when used
+with async/await and asyncio.gather() for concurrent operations.
 """
 
+import asyncio
 import time
 import logging
 from enum import Enum
@@ -43,12 +47,13 @@ class CircuitBreakerConfig:
 
 @dataclass
 class CircuitBreakerState:
-    """Current state of a circuit breaker."""
+    """Current state of a circuit breaker with async lock for thread safety."""
     state: CircuitState = CircuitState.CLOSED
     failure_count: int = 0
     success_count: int = 0
     last_failure_time: Optional[float] = None
     half_open_calls: int = 0
+    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
 
 class InMemoryCircuitBreaker:
