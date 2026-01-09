@@ -15,10 +15,17 @@ import asyncio
 import logging
 import os
 import re
+import sys
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 import httpx
+
+# Import resilience utilities
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+from shared.circuit_breaker import GITHUB_CIRCUIT, circuit_breaker, CircuitOpenError
+from shared.retry import retry, GITHUB_RETRY_CONFIG
+from shared.metrics import emit_error_metric
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -137,6 +144,7 @@ class GitHubCollector:
                 elif resp.status_code == 403:
                     if self._rate_limit_remaining == 0:
                         # Rate limited - calculate wait time
+                        emit_error_metric("rate_limit", service="github")
                         now = int(datetime.now(timezone.utc).timestamp())
                         wait_time = max(0, (self._rate_limit_reset or now) - now)
                         wait_time = min(wait_time, 60)  # Cap at 60 seconds
@@ -145,6 +153,7 @@ class GitHubCollector:
                         continue
                     else:
                         # Other 403 (e.g., blocked repo)
+                        emit_error_metric("forbidden", service="github")
                         logger.warning(f"Access forbidden: {url}")
                         return None
 
@@ -170,6 +179,8 @@ class GitHubCollector:
 
         return None
 
+    @circuit_breaker(GITHUB_CIRCUIT)
+    @retry(GITHUB_RETRY_CONFIG)
     async def get_repo_metrics(self, owner: str, repo: str) -> dict:
         """
         Fetch essential GitHub metrics for a repository.

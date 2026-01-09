@@ -12,11 +12,19 @@ Rate limit: ~1000 requests/hour (undocumented but conservative)
 
 import asyncio
 import logging
+import os
+import sys
 from datetime import datetime, timezone
 from typing import Optional
 from urllib.parse import quote
 
 import httpx
+
+# Import resilience utilities
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+from shared.circuit_breaker import NPM_CIRCUIT, circuit_breaker, CircuitOpenError
+from shared.retry import retry, HTTP_RETRY_CONFIG
+from shared.metrics import emit_error_metric
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -68,6 +76,8 @@ async def retry_with_backoff(
     raise last_exception
 
 
+@circuit_breaker(NPM_CIRCUIT)
+@retry(HTTP_RETRY_CONFIG)
 async def get_npm_metadata(name: str) -> dict:
     """
     Fetch npm-specific metadata.
@@ -101,6 +111,7 @@ async def get_npm_metadata(name: str) -> dict:
             if e.response.status_code == 404:
                 logger.warning(f"Package not found: {name}")
                 return {"error": "package_not_found", "name": name}
+            emit_error_metric("http_error", service="npm")
             raise
 
         # Extract latest version

@@ -12,10 +12,18 @@ deps.dev provides comprehensive package data with NO rate limits:
 
 import asyncio
 import logging
+import os
+import sys
 from typing import Optional
 from urllib.parse import quote
 
 import httpx
+
+# Import resilience utilities
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+from shared.circuit_breaker import DEPSDEV_CIRCUIT, circuit_breaker, CircuitOpenError
+from shared.retry import retry, HTTP_RETRY_CONFIG
+from shared.metrics import emit_error_metric
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -76,6 +84,8 @@ async def retry_with_backoff(
     raise last_exception
 
 
+@circuit_breaker(DEPSDEV_CIRCUIT)
+@retry(HTTP_RETRY_CONFIG)
 async def get_package_info(name: str, ecosystem: str = "npm") -> Optional[dict]:
     """
     Fetch comprehensive package data from deps.dev.
@@ -109,6 +119,7 @@ async def get_package_info(name: str, ecosystem: str = "npm") -> Optional[dict]:
             if e.response.status_code == 404:
                 logger.info(f"Package {name} not found in deps.dev")
                 return None
+            emit_error_metric("http_error", service="deps.dev")
             raise
         pkg_data = pkg_resp.json()
 
