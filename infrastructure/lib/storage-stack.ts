@@ -22,7 +22,9 @@ export class StorageStack extends cdk.Stack {
       partitionKey: { name: "pk", type: dynamodb.AttributeType.STRING },
       sortKey: { name: "sk", type: dynamodb.AttributeType.STRING },
       billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
-      pointInTimeRecovery: true,
+      pointInTimeRecoverySpecification: {
+        pointInTimeRecoveryEnabled: true,
+      },
       removalPolicy: cdk.RemovalPolicy.RETAIN,
       // Enable streams for score calculation trigger
       stream: dynamodb.StreamViewType.NEW_IMAGE,
@@ -57,7 +59,9 @@ export class StorageStack extends cdk.Stack {
       partitionKey: { name: "pk", type: dynamodb.AttributeType.STRING },
       sortKey: { name: "sk", type: dynamodb.AttributeType.STRING },
       billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
-      pointInTimeRecovery: true,
+      pointInTimeRecoverySpecification: {
+        pointInTimeRecoveryEnabled: true,
+      },
       removalPolicy: cdk.RemovalPolicy.RETAIN,
     });
 
