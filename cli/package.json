@@ -27,6 +27,8 @@
   },
   "dependencies": {
     "@dephealth/api-client": "*",
+    "@types/cli-progress": "^3.11.6",
+    "cli-progress": "^3.12.0",
     "commander": "^12.0.0",
     "ora": "^8.2.0",
     "picocolors": "^1.0.0"

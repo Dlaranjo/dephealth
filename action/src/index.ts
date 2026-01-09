@@ -13,6 +13,7 @@ async function run(): Promise<void> {
     const workingDirectory = core.getInput("working-directory") || ".";
     const failOn = core.getInput("fail-on")?.toUpperCase() || "";
     const includeDev = core.getInput("include-dev") !== "false";
+    const softFail = core.getInput("soft-fail") === "true";
 
     // Validate fail-on
     if (failOn && !["HIGH", "CRITICAL"].includes(failOn)) {
@@ -72,15 +73,32 @@ async function run(): Promise<void> {
     // Generate job summary
     await generateSummary(result, failed, failOn);
 
+    // Add annotations for high-risk packages
+    for (const pkg of result.packages) {
+      if (pkg.risk_level === "CRITICAL" || pkg.risk_level === "HIGH") {
+        core.warning(
+          `${pkg.package}: ${pkg.risk_level} risk (health score: ${pkg.health_score}/100)`,
+          {
+            title: "Dependency Health Warning",
+            file: "package.json",
+          }
+        );
+      }
+    }
+
     // Log summary
     core.info(
       `Scan complete: ${result.total} packages (${result.critical} critical, ${result.high} high, ${result.medium} medium, ${result.low} low)`
     );
 
     // Exit based on threshold
-    if (failed) {
+    if (failed && !softFail) {
       core.setFailed(
         `Found ${result.critical} CRITICAL and ${result.high} HIGH risk packages (threshold: ${failOn})`
+      );
+    } else if (failed && softFail) {
+      core.warning(
+        `Found ${result.critical} CRITICAL and ${result.high} HIGH risk packages (threshold: ${failOn}) - soft-fail mode`
       );
     }
   } catch (error) {

@@ -34,6 +34,7 @@ export DEPHEALTH_API_KEY=dh_your_key_here
 
 ```bash
 dephealth check lodash
+dephealth c lodash               # Using alias
 dephealth check @babel/core
 dephealth check lodash --json    # JSON output
 ```
@@ -42,22 +43,43 @@ dephealth check lodash --json    # JSON output
 
 ```bash
 dephealth scan                      # Scan ./package.json
+dephealth s                         # Using alias
 dephealth scan ./path/to/project
 dephealth scan --fail-on HIGH       # Exit 1 if HIGH or CRITICAL (CI mode)
 dephealth scan --fail-on CRITICAL   # Exit 1 only on CRITICAL
-dephealth scan --json               # JSON output
+dephealth scan -o json              # JSON output
+dephealth scan -o sarif             # SARIF format (security tooling)
+dephealth scan --json               # JSON output (deprecated)
 ```
+
+**Output formats:**
+- `table` (default): Human-readable table output
+- `json`: JSON format for programmatic use
+- `sarif`: SARIF 2.1.0 format for security tooling integration
 
 ### Check API usage
 
 ```bash
 dephealth usage
+dephealth u              # Using alias
 ```
+
+### Doctor (diagnostics)
+
+```bash
+dephealth doctor         # Check configuration and API connectivity
+```
+
+Validates:
+- API key configuration
+- API connectivity
+- Node.js version
+- Account tier and usage
 
 ### Configuration
 
 ```bash
-dephealth config set    # Set API key
+dephealth config set    # Set API key (validates key)
 dephealth config show   # Show configuration
 dephealth config clear  # Clear configuration
 ```
@@ -79,6 +101,16 @@ dephealth -v check lodash      # Show API call details
 dephealth --version            # Show version
 ```
 
+## Command Aliases
+
+All main commands have short aliases for faster typing:
+
+| Command | Alias |
+|---------|-------|
+| `check` | `c` |
+| `scan` | `s` |
+| `usage` | `u` |
+
 ## CI/CD Integration
 
 ```yaml
@@ -96,6 +128,15 @@ For quieter CI output:
   env:
     DEPHEALTH_API_KEY: ${{ secrets.DEPHEALTH_API_KEY }}
   run: npx @dephealth/cli -q scan --fail-on HIGH
+```
+
+SARIF output for security tooling:
+
+```yaml
+- name: Check dependencies
+  env:
+    DEPHEALTH_API_KEY: ${{ secrets.DEPHEALTH_API_KEY }}
+  run: npx @dephealth/cli scan -o sarif > dephealth.sarif
 ```
 
 ## Exit Codes
