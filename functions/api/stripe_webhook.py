@@ -163,6 +163,24 @@ def handler(event, context):
     }
 
 
+def _customer_exists(customer_id: str) -> bool:
+    """Check if a Stripe customer already exists in our database."""
+    if not customer_id:
+        return False
+
+    table = dynamodb.Table(API_KEYS_TABLE)
+    try:
+        response = table.query(
+            IndexName="stripe-customer-index",
+            KeyConditionExpression=Key("stripe_customer_id").eq(customer_id),
+            Limit=1,
+        )
+        return len(response.get("Items", [])) > 0
+    except Exception as e:
+        logger.error(f"Error checking customer existence: {e}")
+        return False
+
+
 def _handle_checkout_completed(session: dict):
     """Handle successful checkout - upgrade user to paid tier."""
     customer_email = session.get("customer_email")
@@ -188,8 +206,12 @@ def _handle_checkout_completed(session: dict):
     price_id = subscription["items"]["data"][0]["price"]["id"]
     tier = PRICE_TO_TIER.get(price_id, "starter")
 
+    # Check if this is an upgrade (existing customer) vs new signup
+    is_upgrade = customer_id and _customer_exists(customer_id)
+
     # Update user tier in DynamoDB
-    _update_user_tier(customer_email, tier, customer_id, subscription_id)
+    # Reset usage on upgrade to give users a fresh start with new limit
+    _update_user_tier(customer_email, tier, customer_id, subscription_id, reset_usage=is_upgrade)
 
 
 def _handle_subscription_updated(subscription: dict):
@@ -275,10 +297,18 @@ def _update_user_tier(
     tier: str,
     customer_id: str = None,
     subscription_id: str = None,
+    reset_usage: bool = False,
 ):
     """Update user tier in DynamoDB after successful payment.
 
     Uses email-index GSI to find user by email address.
+
+    Args:
+        email: User email
+        tier: New tier name
+        customer_id: Stripe customer ID
+        subscription_id: Stripe subscription ID
+        reset_usage: If True, reset requests_this_month to 0 (for upgrades)
     """
     if not email:
         logger.error("Cannot update tier: no email provided")
@@ -297,6 +327,8 @@ def _update_user_tier(
         logger.error(f"No user found for email {email} during tier update")
         return
 
+    new_limit = TIER_LIMITS.get(tier, TIER_LIMITS["free"])
+
     # Update all API keys for this user (skip PENDING signups)
     updated_count = 0
     for item in items:
@@ -306,10 +338,11 @@ def _update_user_tier(
             logger.debug(f"Skipping PENDING record for {email}")
             continue
 
-        update_expr = "SET tier = :tier, tier_updated_at = :now"
+        update_expr = "SET tier = :tier, tier_updated_at = :now, monthly_limit = :limit"
         expr_values = {
             ":tier": tier,
             ":now": datetime.now(timezone.utc).isoformat(),
+            ":limit": new_limit,
         }
 
         # Also set Stripe IDs if provided
@@ -323,6 +356,12 @@ def _update_user_tier(
         # Reset payment failures on successful tier update
         update_expr += ", payment_failures = :zero"
         expr_values[":zero"] = 0
+
+        # Reset usage on upgrade to give fresh start with new limit
+        if reset_usage:
+            update_expr += ", requests_this_month = :zero_usage"
+            expr_values[":zero_usage"] = 0
+            logger.info(f"Resetting usage for {item['pk']} on tier upgrade to {tier}")
 
         table.update_item(
             Key={"pk": item["pk"], "sk": item["sk"]},

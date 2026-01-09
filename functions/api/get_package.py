@@ -21,6 +21,7 @@ logger.setLevel(logging.INFO)
 # Import from shared module (bundled with Lambda)
 from shared.auth import validate_api_key, check_and_increment_usage
 from shared.response_utils import decimal_default, error_response
+from shared.rate_limit_utils import check_usage_alerts, get_reset_timestamp
 
 # Demo mode settings
 DEMO_REQUESTS_PER_HOUR = 20
@@ -319,6 +320,14 @@ def handler(event, context):
             max(0, user["monthly_limit"] - authenticated_usage_count)
         )
         response_headers["X-RateLimit-Reset"] = str(reset_timestamp)
+
+        # Check for usage alerts and add to response
+        alert = check_usage_alerts(user, authenticated_usage_count)
+        if alert:
+            response_headers["X-Usage-Alert"] = alert["level"]
+            response_headers["X-Usage-Percent"] = str(alert["percent"])
+            # Include alert in response body for API consumers
+            response_data["usage_alert"] = alert
 
     return {
         "statusCode": 200,
