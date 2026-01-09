@@ -14,13 +14,17 @@ from scoring.health_score import (
     _calculate_maturity_factor,
     _community_health,
     _evolution_health,
+    _filter_bot_commits,
     _get_risk_level,
+    _issue_response_score,
     _maintainer_health,
+    _pr_velocity_score,
     _security_health,
     _user_centric_health,
     calculate_health_score,
 )
 from scoring.abandonment_risk import (
+    _calculate_time_adjusted_risk,
     calculate_abandonment_risk,
     get_risk_trend,
 )
@@ -182,47 +186,48 @@ class TestCommunityHealth:
         data = {"total_contributors": 100}
         score = _community_health(data)
 
-        # log10(101) / 1.7 ~= 1.18 -> capped at 1.0
-        assert score >= 0.95
+        # Now: contributor (1.0) * 0.6 + issue_response (0.5 default) * 0.4 = 0.8
+        assert score >= 0.75
 
     def test_low_contributors_scores_low(self):
         """Few contributors should score lower."""
         data = {"total_contributors": 2}
         score = _community_health(data)
 
-        # log10(3) / 1.7 ~= 0.28
-        assert 0.2 < score < 0.4
+        # Now: contributor (0.28) * 0.6 + issue_response (0.5 default) * 0.4 ≈ 0.37
+        assert 0.3 < score < 0.45
 
     def test_single_contributor(self):
         """Single contributor should score low but not zero."""
         data = {"total_contributors": 1}
         score = _community_health(data)
 
-        # log10(2) / 1.7 ~= 0.18
-        assert 0.1 < score < 0.3
+        # Now: contributor (0.18) * 0.6 + issue_response (0.5 default) * 0.4 ≈ 0.31
+        assert 0.25 < score < 0.35
 
     def test_missing_contributors_defaults_to_one(self):
         """Missing total_contributors should default to 1."""
         data = {}
         score = _community_health(data)
 
-        # Default = 1, so log10(2) / 1.7 ~= 0.18
-        assert 0.1 < score < 0.3
+        # Now includes issue response (0.5 default): contributor (0.18) * 0.6 + 0.5 * 0.4 ≈ 0.31
+        assert 0.25 < score < 0.35
 
     def test_none_contributors_defaults_to_one(self):
         """None total_contributors should default to 1."""
         data = {"total_contributors": None}
         score = _community_health(data)
 
-        assert 0.1 < score < 0.3
+        # Now includes issue response (0.5 default)
+        assert 0.25 < score < 0.35
 
     def test_zero_contributors_defaults_to_one(self):
         """Zero contributors should be treated as 1."""
         data = {"total_contributors": 0}
         score = _community_health(data)
 
-        # 0 or 1 pattern should give 1
-        assert 0.1 < score < 0.3
+        # Now includes issue response (0.5 default)
+        assert 0.25 < score < 0.35
 
 
 class TestRiskLevel:
@@ -272,6 +277,10 @@ class TestConfidence:
             "active_contributors_90d": 5,
             "last_published": "2025-12-01T00:00:00Z",
             "last_updated": "2026-01-06T00:00:00Z",  # Yesterday
+            # New signals (v3) for complete data
+            "avg_issue_response_hours": 24,
+            "prs_merged_90d": 50,
+            "prs_opened_90d": 100,
         }
         result = _calculate_confidence(data)
 
@@ -291,7 +300,8 @@ class TestCalculateAbandonmentRisk:
         """Well-maintained package should have low abandonment risk."""
         result = calculate_abandonment_risk(sample_healthy_package)
 
-        assert result["probability"] < 30
+        # With Weibull survival analysis, risk is calculated more realistically
+        assert result["probability"] < 50
         assert result["time_horizon_months"] == 12
 
     def test_abandoned_package_high_risk(self, sample_abandoned_package):
@@ -688,10 +698,12 @@ class TestWeightDistribution:
         # Verify the weights by checking score calculation
         # Create data where each component scores exactly 1.0
         data = {
-            # Maintainer: recent commits + good bus factor
+            # Maintainer: recent commits + good bus factor + high PR velocity
             "days_since_last_commit": 0,
             "active_contributors_90d": 10,
             "true_bus_factor": 10,
+            "prs_merged_90d": 90,
+            "prs_opened_90d": 100,
             # User-Centric: very high adoption
             "weekly_downloads": 100_000_000,
             "dependents_count": 100_000,
@@ -699,8 +711,9 @@ class TestWeightDistribution:
             # Evolution: recent release + active
             "last_published": "2026-01-01T00:00:00Z",
             "commits_90d": 100,
-            # Community: many contributors
+            # Community: many contributors + fast issue response
             "total_contributors": 100,
+            "avg_issue_response_hours": 12,
             # Security: perfect score
             "openssf_score": 10.0,
             "advisories": [],
@@ -1585,3 +1598,283 @@ class TestMonotonicity:
             })
             assert score >= prev_score, f"Score decreased from {prev_score} to {score} at openssf={openssf}"
             prev_score = score
+
+
+# =============================================================================
+# Tests for New Scoring Signals (Agent 3 Enhancements)
+# =============================================================================
+
+
+class TestIssueResponseScore:
+    """Tests for _issue_response_score - Issue response time signal."""
+
+    def test_fast_response_scores_perfect(self):
+        """Response under 24h should score 1.0."""
+        data = {"avg_issue_response_hours": 12}
+        score = _issue_response_score(data)
+        assert score == 1.0
+
+    def test_moderate_response_scores_high(self):
+        """Response 24-72h should score 0.7-1.0."""
+        data_24h = {"avg_issue_response_hours": 24}
+        data_48h = {"avg_issue_response_hours": 48}
+        data_72h = {"avg_issue_response_hours": 72}
+
+        score_24h = _issue_response_score(data_24h)
+        score_48h = _issue_response_score(data_48h)
+        score_72h = _issue_response_score(data_72h)
+
+        assert score_24h == 1.0
+        assert 0.7 < score_48h < 1.0
+        assert score_72h == 0.7
+
+    def test_slow_response_decays_exponentially(self):
+        """Response > 72h should decay exponentially."""
+        data_100h = {"avg_issue_response_hours": 100}
+        data_200h = {"avg_issue_response_hours": 200}
+
+        score_100h = _issue_response_score(data_100h)
+        score_200h = _issue_response_score(data_200h)
+
+        assert score_100h < 0.7
+        assert score_200h < score_100h
+        assert score_200h > 0  # Should never reach 0
+
+    def test_no_data_returns_neutral(self):
+        """Missing issue data should return neutral 0.5."""
+        data = {}
+        score = _issue_response_score(data)
+        assert score == 0.5
+
+
+class TestPRVelocityScore:
+    """Tests for _pr_velocity_score - PR merge velocity signal."""
+
+    def test_high_velocity_scores_high(self):
+        """80%+ merge rate should score high (> 0.85)."""
+        data = {"prs_opened_90d": 100, "prs_merged_90d": 90}
+        score = _pr_velocity_score(data)
+        assert score > 0.85
+
+    def test_moderate_velocity_scores_moderate(self):
+        """50% merge rate should score ~0.5."""
+        data = {"prs_opened_90d": 100, "prs_merged_90d": 50}
+        score = _pr_velocity_score(data)
+        assert 0.4 < score < 0.6
+
+    def test_low_velocity_scores_low(self):
+        """20% merge rate should score low."""
+        data = {"prs_opened_90d": 100, "prs_merged_90d": 20}
+        score = _pr_velocity_score(data)
+        assert score < 0.2
+
+    def test_no_prs_returns_neutral(self):
+        """No PRs (stable package) should return neutral 0.5."""
+        data = {"prs_opened_90d": 0, "prs_merged_90d": 0}
+        score = _pr_velocity_score(data)
+        assert score == 0.5
+
+    def test_velocity_is_monotonic(self):
+        """Higher merge rates should never decrease score."""
+        merge_rates = [0.1, 0.3, 0.5, 0.7, 0.9]
+        prev_score = -1
+
+        for rate in merge_rates:
+            data = {"prs_opened_90d": 100, "prs_merged_90d": int(100 * rate)}
+            score = _pr_velocity_score(data)
+            assert score >= prev_score
+            prev_score = score
+
+
+class TestBotCommitFiltering:
+    """Tests for _filter_bot_commits - Bot commit filtering."""
+
+    def test_filters_dependabot(self):
+        """Should filter out dependabot commits."""
+        commits = [
+            {"author": "dependabot[bot]"},
+            {"author": "real-user"},
+        ]
+        filtered = _filter_bot_commits(commits)
+        assert len(filtered) == 1
+        assert filtered[0]["author"] == "real-user"
+
+    def test_filters_multiple_bots(self):
+        """Should filter out multiple bot types."""
+        commits = [
+            {"author": "dependabot[bot]"},
+            {"author": "renovate[bot]"},
+            {"author": "github-actions[bot]"},
+            {"author": "real-user"},
+        ]
+        filtered = _filter_bot_commits(commits)
+        assert len(filtered) == 1
+
+    def test_case_insensitive(self):
+        """Bot filtering should be case insensitive."""
+        commits = [
+            {"author": "DEPENDABOT[bot]"},
+            {"author": "real-user"},
+        ]
+        filtered = _filter_bot_commits(commits)
+        assert len(filtered) == 1
+
+    def test_no_bots_returns_all(self):
+        """Should return all commits if no bots."""
+        commits = [
+            {"author": "user1"},
+            {"author": "user2"},
+        ]
+        filtered = _filter_bot_commits(commits)
+        assert len(filtered) == 2
+
+
+class TestWeibullRiskCalculation:
+    """Tests for _calculate_time_adjusted_risk - Weibull survival analysis."""
+
+    def test_risk_increases_with_time(self):
+        """Risk should increase over time."""
+        base_risk = 0.5
+        risk_12m = _calculate_time_adjusted_risk(base_risk, 12)
+        risk_24m = _calculate_time_adjusted_risk(base_risk, 24)
+
+        assert risk_24m > risk_12m
+
+    def test_higher_base_risk_increases_faster(self):
+        """Higher base risk should result in faster risk increase."""
+        low_risk_24m = _calculate_time_adjusted_risk(0.2, 24)
+        high_risk_24m = _calculate_time_adjusted_risk(0.8, 24)
+
+        assert high_risk_24m > low_risk_24m
+
+    def test_risk_capped_at_95_percent(self):
+        """Risk should be capped at 0.95."""
+        base_risk = 0.9
+        risk_100m = _calculate_time_adjusted_risk(base_risk, 100)
+
+        assert risk_100m <= 0.95
+
+    def test_zero_months_returns_low_risk(self):
+        """Zero time horizon should return near-zero risk."""
+        base_risk = 0.5
+        risk_0m = _calculate_time_adjusted_risk(base_risk, 0)
+
+        assert risk_0m < 0.1
+
+
+class TestConfidenceIntervals:
+    """Tests for confidence intervals in health scores."""
+
+    def test_confidence_interval_included_in_result(self):
+        """Health score result should include confidence_interval."""
+        data = {
+            "days_since_last_commit": 30,
+            "weekly_downloads": 100000,
+            "active_contributors_90d": 5,
+            "last_published": "2025-11-01T00:00:00Z",
+            "created_at": "2020-01-01T00:00:00Z",
+        }
+        result = calculate_health_score(data)
+
+        assert "confidence_interval" in result
+        assert isinstance(result["confidence_interval"], list)
+        assert len(result["confidence_interval"]) == 2
+
+    def test_confidence_interval_bounds_score(self):
+        """Confidence interval should bound the health score."""
+        data = {
+            "days_since_last_commit": 30,
+            "weekly_downloads": 100000,
+            "active_contributors_90d": 5,
+            "last_published": "2025-11-01T00:00:00Z",
+            "created_at": "2020-01-01T00:00:00Z",
+        }
+        result = calculate_health_score(data)
+
+        score = result["health_score"]
+        lower, upper = result["confidence_interval"]
+
+        assert lower <= score <= upper
+
+    def test_confidence_interval_within_valid_range(self):
+        """Confidence interval should be within 0-100."""
+        data = {
+            "days_since_last_commit": 30,
+            "weekly_downloads": 100000,
+            "active_contributors_90d": 5,
+            "last_published": "2025-11-01T00:00:00Z",
+            "created_at": "2020-01-01T00:00:00Z",
+        }
+        result = calculate_health_score(data)
+
+        lower, upper = result["confidence_interval"]
+
+        assert 0 <= lower <= 100
+        assert 0 <= upper <= 100
+
+    def test_data_quality_in_confidence(self):
+        """Confidence result should include data_quality."""
+        data = {
+            "days_since_last_commit": 30,
+            "weekly_downloads": 100000,
+            "active_contributors_90d": 5,
+            "last_published": "2025-11-01T00:00:00Z",
+            "created_at": "2020-01-01T00:00:00Z",
+            "avg_issue_response_hours": 24,
+            "prs_merged_90d": 50,
+            "prs_opened_90d": 100,
+        }
+        result = calculate_health_score(data)
+
+        assert "data_quality" in result["confidence"]
+        assert result["confidence"]["data_quality"] in ["high", "medium", "low"]
+
+
+class TestEnhancedScoringIntegration:
+    """Integration tests for all new scoring enhancements."""
+
+    def test_new_signals_affect_score(self):
+        """New signals should affect the overall score."""
+        base_data = {
+            "days_since_last_commit": 30,
+            "weekly_downloads": 100000,
+            "active_contributors_90d": 5,
+            "last_published": "2025-11-01T00:00:00Z",
+            "created_at": "2020-01-01T00:00:00Z",
+        }
+
+        enhanced_data = {
+            **base_data,
+            "avg_issue_response_hours": 12,  # Fast response
+            "prs_merged_90d": 90,  # High velocity
+            "prs_opened_90d": 100,
+        }
+
+        base_score = calculate_health_score(base_data)["health_score"]
+        enhanced_score = calculate_health_score(enhanced_data)["health_score"]
+
+        # Enhanced data should score higher
+        assert enhanced_score > base_score
+
+    def test_bot_filtered_commits_preferred(self):
+        """Bot-filtered commit count should be used when available."""
+        data_with_bots = {
+            "days_since_last_commit": 30,
+            "commits_90d": 30,  # Includes bots
+            "weekly_downloads": 100000,
+            "active_contributors_90d": 5,
+            "last_published": "2025-11-01T00:00:00Z",
+            "created_at": "2020-01-01T00:00:00Z",
+        }
+
+        data_filtered = {
+            **data_with_bots,
+            "commits_90d_non_bot": 10,  # Bots filtered out - lower activity
+        }
+
+        # The filtered data should have different evolution score
+        result_with_bots = calculate_health_score(data_with_bots)
+        result_filtered = calculate_health_score(data_filtered)
+
+        # Filtered data should have lower evolution score (fewer real commits)
+        assert result_filtered["components"]["evolution_health"] < result_with_bots["components"]["evolution_health"]

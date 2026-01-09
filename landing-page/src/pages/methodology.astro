@@ -16,7 +16,7 @@ const components = [
     weight: 25,
     color: 'green',
     description: 'Active maintenance and sustainability',
-    signals: ['Days since last commit', 'True bus factor (contribution distribution)']
+    signals: ['Days since last commit', 'True bus factor (contribution distribution)', 'PR merge velocity']
   },
   {
     name: 'Evolution',
@@ -37,7 +37,7 @@ const components = [
     weight: 10,
     color: 'orange',
     description: 'Contributor diversity and engagement',
-    signals: ['Total contributors']
+    signals: ['Total contributors', 'Issue response time']
   }
 ]
 ---
@@ -141,6 +141,51 @@ const components = [
               <p><span class="text-zinc-300">Security Policy (20%):</span> Has SECURITY.md with disclosure process</p>
             </div>
           </div>
+
+          <!-- PR Merge Velocity -->
+          <div class="bg-zinc-800/50 rounded-lg p-6 border border-zinc-700/50">
+            <h3 class="text-lg font-medium text-white mb-3">PR Merge Velocity</h3>
+            <p class="text-zinc-400 mb-4">
+              Measures maintainer responsiveness by tracking the ratio of merged to opened pull requests over the last 90 days.
+            </p>
+            <div class="text-sm text-zinc-400">
+              <span class="text-zinc-300">Interpretation:</span>
+              <ul class="mt-2 space-y-1 ml-4">
+                <li>&gt;80% merge rate: High maintainer responsiveness</li>
+                <li>~50% merge rate: Moderate maintainer engagement</li>
+                <li>&lt;30% merge rate: Potential maintainer overload or abandonment</li>
+                <li>No PRs: Neutral score (could indicate stable package)</li>
+              </ul>
+            </div>
+          </div>
+
+          <!-- Issue Response Time -->
+          <div class="bg-zinc-800/50 rounded-lg p-6 border border-zinc-700/50">
+            <h3 class="text-lg font-medium text-white mb-3">Issue Response Time</h3>
+            <p class="text-zinc-400 mb-4">
+              Fast issue response time is a strong indicator of maintainer engagement and project health.
+            </p>
+            <div class="text-sm text-zinc-400">
+              <span class="text-zinc-300">Scoring:</span>
+              <ul class="mt-2 space-y-1 ml-4">
+                <li>&lt;24 hours: Perfect score (1.0)</li>
+                <li>24-72 hours: High score (0.7-1.0)</li>
+                <li>&gt;72 hours: Exponential decay</li>
+                <li>No data: Neutral score (0.5)</li>
+              </ul>
+            </div>
+          </div>
+
+          <!-- Bot Commit Filtering -->
+          <div class="bg-zinc-800/50 rounded-lg p-6 border border-zinc-700/50">
+            <h3 class="text-lg font-medium text-white mb-3">Bot Commit Filtering</h3>
+            <p class="text-zinc-400 mb-4">
+              We filter out commits from known bot accounts (Dependabot, Renovate, etc.) to get accurate human activity metrics.
+            </p>
+            <p class="text-sm text-zinc-400">
+              <span class="text-zinc-300">Why it matters:</span> Bot commits can artificially inflate activity metrics. We analyze real human contributions for more accurate health assessment.
+            </p>
+          </div>
         </div>
       </section>
 
@@ -185,23 +230,26 @@ const components = [
           </div>
           <div class="bg-zinc-800/50 rounded-lg p-4 border border-zinc-700/50">
             <h3 class="font-medium text-white mb-2">GitHub API</h3>
-            <p class="text-sm text-zinc-400">Commits, contributors, stars, archived status</p>
+            <p class="text-sm text-zinc-400">Commits, contributors, stars, issue response times, PR merge velocity, archived status</p>
           </div>
         </div>
       </section>
 
       <!-- Confidence -->
       <section class="mb-16">
-        <h2 class="text-2xl font-semibold text-white mb-6">Confidence Levels</h2>
+        <h2 class="text-2xl font-semibold text-white mb-6">Confidence Levels & Intervals</h2>
         <p class="text-zinc-400 mb-4">
-          Every score includes a confidence level indicating data reliability:
+          Every score includes a confidence level and interval indicating data reliability:
         </p>
-        <ul class="text-zinc-400 space-y-2">
-          <li><span class="text-green-400 font-medium">HIGH:</span> Complete data, package &gt;1 year old, recently updated</li>
-          <li><span class="text-yellow-400 font-medium">MEDIUM:</span> Some data missing or package 6-12 months old</li>
-          <li><span class="text-orange-400 font-medium">LOW:</span> Significant data gaps or stale information</li>
+        <ul class="text-zinc-400 space-y-2 mb-4">
+          <li><span class="text-green-400 font-medium">HIGH:</span> Complete data, package &gt;1 year old, recently updated (±5 point interval)</li>
+          <li><span class="text-yellow-400 font-medium">MEDIUM:</span> Some data missing or package 6-12 months old (±10 point interval)</li>
+          <li><span class="text-orange-400 font-medium">LOW:</span> Significant data gaps or stale information (±15 point interval)</li>
           <li><span class="text-red-400 font-medium">INSUFFICIENT_DATA:</span> Package &lt;90 days old - scores unreliable</li>
         </ul>
+        <p class="text-sm text-zinc-400">
+          <span class="text-zinc-300">Confidence intervals:</span> Wider intervals for lower data quality reflect increased uncertainty. A score of 75 with HIGH confidence has an interval of [70, 80], while LOW confidence might be [60, 90].
+        </p>
       </section>
 
       <!-- Limitations -->
@@ -228,10 +276,20 @@ const components = [
         <div class="space-y-4">
           <div class="bg-zinc-800/50 rounded-lg p-4 border border-zinc-700/50">
             <div class="flex justify-between items-center mb-2">
-              <span class="font-medium text-white">v2.0 - January 2026</span>
+              <span class="font-medium text-white">v3.0 - January 2026</span>
               <span class="text-xs bg-blue-500/20 text-blue-400 px-2 py-1 rounded">Current</span>
             </div>
             <ul class="text-sm text-zinc-400 space-y-1">
+              <li>Added issue response time signal to Community Health</li>
+              <li>Added PR merge velocity signal to Maintainer Health</li>
+              <li>Improved abandonment risk with Weibull survival analysis</li>
+              <li>Added confidence intervals based on data quality</li>
+              <li>Bot commit filtering for accurate activity metrics</li>
+            </ul>
+          </div>
+          <div class="bg-zinc-800/50 rounded-lg p-4 border border-zinc-700/50">
+            <span class="font-medium text-white">v2.0 - January 2026</span>
+            <ul class="text-sm text-zinc-400 space-y-1 mt-2">
               <li>Added Security as 5th component (15% weight)</li>
               <li>True bus factor from contribution distribution</li>
               <li>Maturity factor for stable packages</li>

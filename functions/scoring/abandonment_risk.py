@@ -11,6 +11,35 @@ from typing import Optional
 logger = logging.getLogger(__name__)
 
 
+def _calculate_time_adjusted_risk(base_risk: float, months: int) -> float:
+    """
+    Adjust risk using Weibull survival analysis.
+
+    The Weibull distribution is commonly used for reliability/survival analysis.
+    Shape parameter k > 1 means increasing hazard rate over time.
+
+    Args:
+        base_risk: Base risk score (0-1)
+        months: Time horizon in months
+
+    Returns:
+        Time-adjusted risk probability (0-0.95)
+    """
+    # Parameters would ideally be fit from historical data
+    k = 1.5  # Shape parameter (k > 1 = increasing failure rate)
+    lambda_ = 18  # Scale parameter (median time to abandonment in months)
+
+    # Combine with base risk
+    # High base risk = faster decline in survival
+    adjusted_lambda = lambda_ * (1 - base_risk * 0.5)
+
+    # Survival probability using Weibull distribution
+    survival_prob = math.exp(-((months / adjusted_lambda) ** k))
+
+    # Risk is inverse of survival, capped at 0.95
+    return min(1 - survival_prob, 0.95)
+
+
 def calculate_abandonment_risk(data: dict, months: int = 12) -> dict:
     """
     Predict abandonment probability over a given time horizon.
@@ -95,9 +124,9 @@ def calculate_abandonment_risk(data: dict, months: int = 12) -> dict:
         + release_risk * 0.15
     )
 
-    # Adjust for time horizon (longer = higher risk)
-    time_factor = min(months / 12, 2.0)
-    adjusted_risk = min(risk_score * time_factor, 0.95)
+    # Adjust for time horizon using Weibull survival analysis
+    # This provides more realistic risk progression than linear scaling
+    adjusted_risk = _calculate_time_adjusted_risk(risk_score, months)
 
     # Identify specific risk factors for explanation
     factors = []

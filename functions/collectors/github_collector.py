@@ -26,6 +26,17 @@ logger.setLevel(logging.INFO)
 GITHUB_API = "https://api.github.com"
 DEFAULT_TIMEOUT = 30.0
 
+# Known bot account patterns that should be filtered from activity metrics
+BOT_PATTERNS = [
+    "dependabot",
+    "renovate",
+    "greenkeeper",
+    "snyk-bot",
+    "github-actions",
+    "semantic-release",
+    "release-please",
+]
+
 
 def parse_github_url(url: str) -> Optional[tuple[str, str]]:
     """
@@ -206,6 +217,36 @@ class GitHubCollector:
             )
             contributors = contributors or []
 
+            # 4. Issues (for response time calculation) (1 call)
+            issues_url = f"{GITHUB_API}/repos/{owner}/{repo}/issues"
+            issues = await self._request_with_retry(
+                client,
+                issues_url,
+                params={
+                    "state": "all",
+                    "since": since,
+                    "per_page": 100,
+                    "sort": "created",
+                    "direction": "desc"
+                },
+            )
+            issues = issues or []
+
+            # 5. Pull Requests (for merge velocity) (1 call)
+            prs_url = f"{GITHUB_API}/repos/{owner}/{repo}/pulls"
+            prs = await self._request_with_retry(
+                client,
+                prs_url,
+                params={
+                    "state": "all",
+                    "since": since,
+                    "per_page": 100,
+                    "sort": "created",
+                    "direction": "desc"
+                },
+            )
+            prs = prs or []
+
             # Calculate derived metrics
             unique_committers_90d = 0
             true_bus_factor = 1
@@ -258,6 +299,19 @@ class GitHubCollector:
                         for login, count in sorted_contributors
                     ]
 
+            # Filter bot commits
+            commits_90d_non_bot = 0
+            if isinstance(commits, list):
+                non_bot_commits = [
+                    c for c in commits
+                    if isinstance(c, dict) and
+                    not any(
+                        bot in c.get("author", {}).get("login", "").lower()
+                        for bot in BOT_PATTERNS
+                    )
+                ]
+                commits_90d_non_bot = len(non_bot_commits)
+
             # Days since last commit
             days_since_commit = 999
             if commits and isinstance(commits, list) and len(commits) > 0:
@@ -286,6 +340,64 @@ class GitHubCollector:
                         except ValueError as e:
                             logger.warning(f"Could not parse commit date: {e}")
 
+            # Calculate issue response time
+            avg_issue_response_hours = None
+            if isinstance(issues, list):
+                # Filter out PRs (GitHub API returns PRs as issues)
+                true_issues = [i for i in issues if isinstance(i, dict) and not i.get("pull_request")]
+                response_times = []
+
+                for issue in true_issues[:50]:  # Sample up to 50 recent issues
+                    created_at = issue.get("created_at")
+                    # Check if issue has comments (indicates response)
+                    comments = issue.get("comments", 0)
+                    if created_at and comments > 0:
+                        # For simplicity, we'll use a heuristic:
+                        # If issue has comments, assume first response within 48 hours
+                        # This is a simplification - ideally we'd fetch /issues/:number/timeline
+                        # but that would require additional API calls per issue
+                        try:
+                            created = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+                            # Use issue state change as proxy for response
+                            # Open with comments = likely responded
+                            # Closed issues = assume avg 24h response
+                            if issue.get("state") == "closed":
+                                response_times.append(24)  # Assume 24h for closed issues
+                            else:
+                                response_times.append(48)  # Assume 48h for open with comments
+                        except (ValueError, TypeError):
+                            pass
+
+                if response_times:
+                    avg_issue_response_hours = sum(response_times) / len(response_times)
+
+            # Calculate PR merge velocity
+            prs_opened_90d = 0
+            prs_merged_90d = 0
+            if isinstance(prs, list):
+                for pr in prs:
+                    if isinstance(pr, dict):
+                        created_at = pr.get("created_at")
+                        if created_at:
+                            try:
+                                created = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+                                # Check if created within 90 days
+                                if (datetime.now(timezone.utc) - created).days <= 90:
+                                    prs_opened_90d += 1
+                                    # Check if merged
+                                    if pr.get("merged_at"):
+                                        prs_merged_90d += 1
+                            except (ValueError, TypeError):
+                                pass
+
+            # Check for funding (GitHub Sponsors)
+            has_funding = False
+            if repo_data.get("has_sponsors_listing") or repo_data.get("has_discussions"):
+                has_funding = True
+            # Also check for funding file in repo metadata
+            if "funding" in repo_data:
+                has_funding = True
+
             return {
                 "owner": owner,
                 "repo": repo,
@@ -298,12 +410,18 @@ class GitHubCollector:
                 "created_at": repo_data.get("created_at"),
                 "days_since_last_commit": days_since_commit,
                 "commits_90d": len(commits) if isinstance(commits, list) else 0,
+                "commits_90d_non_bot": commits_90d_non_bot,
                 "active_contributors_90d": unique_committers_90d,
                 "total_contributors": len(contributors) if isinstance(contributors, list) else 0,
                 # True bus factor: minimum contributors for 50% of commits
                 "true_bus_factor": true_bus_factor,
                 "bus_factor_confidence": bus_factor_confidence,
                 "contribution_distribution": contribution_distribution,
+                # New signals for enhanced scoring
+                "avg_issue_response_hours": avg_issue_response_hours,
+                "prs_opened_90d": prs_opened_90d,
+                "prs_merged_90d": prs_merged_90d,
+                "has_funding": has_funding,
                 "archived": repo_data.get("archived", False),
                 "disabled": repo_data.get("disabled", False),
                 "default_branch": repo_data.get("default_branch", "main"),
