@@ -10,7 +10,9 @@ import logging
 import os
 import random
 import time
+from datetime import datetime, timezone
 from decimal import Decimal
+from typing import Optional
 import boto3
 
 logger = logging.getLogger(__name__)
@@ -19,6 +21,51 @@ logger.setLevel(logging.INFO)
 # Import from shared module (bundled with Lambda)
 from shared.auth import validate_api_key, check_and_increment_usage_batch
 from shared.response_utils import error_response, decimal_default
+
+
+def get_reset_timestamp() -> int:
+    """Get Unix timestamp for start of next month (when usage resets)."""
+    now = datetime.now(timezone.utc)
+
+    # First day of next month
+    if now.month == 12:
+        next_month = datetime(now.year + 1, 1, 1, tzinfo=timezone.utc)
+    else:
+        next_month = datetime(now.year, now.month + 1, 1, tzinfo=timezone.utc)
+
+    return int(next_month.timestamp())
+
+
+def check_usage_alerts(user: dict, current_usage: int) -> Optional[dict]:
+    """
+    Check if user is approaching rate limit and return alert info.
+
+    Returns dict with alert level and message if applicable, None otherwise.
+    """
+    limit = user.get("monthly_limit", 5000)
+    usage_percent = (current_usage / limit) * 100 if limit > 0 else 100
+
+    if usage_percent >= 100:
+        return {
+            "level": "exceeded",
+            "percent": 100,
+            "message": f"Monthly limit exceeded. Upgrade at https://dephealth.laranjo.dev/pricing",
+        }
+    elif usage_percent >= 95:
+        return {
+            "level": "critical",
+            "percent": round(usage_percent, 1),
+            "message": f"Only {limit - current_usage} requests remaining this month",
+        }
+    elif usage_percent >= 80:
+        return {
+            "level": "warning",
+            "percent": round(usage_percent, 1),
+            "message": f"{round(100 - usage_percent, 1)}% of monthly quota remaining",
+        }
+
+    return None
+
 
 dynamodb = boto3.resource("dynamodb")
 PACKAGES_TABLE = os.environ.get("PACKAGES_TABLE", "dephealth-packages")
@@ -158,24 +205,40 @@ def handler(event, context):
     risk_order = {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "LOW": 3, None: 4}
     results.sort(key=lambda x: (risk_order.get(x["risk_level"], 4), x["package"]))
 
+    # Build response headers
+    response_headers = {
+        "Content-Type": "application/json",
+        "X-RateLimit-Limit": str(user["monthly_limit"]),
+        "X-RateLimit-Remaining": str(remaining),  # Already reflects reserved quota
+        "X-RateLimit-Reset": str(get_reset_timestamp()),
+    }
+
+    # Check for usage alerts and add to response
+    alert = check_usage_alerts(user, new_count)
+
+    # Build response body
+    response_body = {
+        "total": len(dependencies),
+        "critical": critical_count,
+        "high": high_count,
+        "medium": medium_count,
+        "low": low_count,
+        "packages": results,
+        "not_found": not_found,
+    }
+
+    if alert:
+        response_headers["X-Usage-Alert"] = alert["level"]
+        response_headers["X-Usage-Percent"] = str(alert["percent"])
+        # Include alert in response body for API consumers
+        response_body["usage_alert"] = alert
+
     # Response format matches CLI/Action ScanResult interface:
     # { total, critical, high, medium, low, packages }
     return {
         "statusCode": 200,
-        "headers": {
-            "Content-Type": "application/json",
-            "X-RateLimit-Limit": str(user["monthly_limit"]),
-            "X-RateLimit-Remaining": str(remaining),  # Already reflects reserved quota
-        },
-        "body": json.dumps({
-            "total": len(dependencies),
-            "critical": critical_count,
-            "high": high_count,
-            "medium": medium_count,
-            "low": low_count,
-            "packages": results,
-            "not_found": not_found,
-        }, default=decimal_default),
+        "headers": response_headers,
+        "body": json.dumps(response_body, default=decimal_default),
     }
 
 
