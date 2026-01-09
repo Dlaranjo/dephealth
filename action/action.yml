@@ -22,6 +22,10 @@ inputs:
     description: 'Include devDependencies in scan'
     required: false
     default: 'true'
+  soft-fail:
+    description: 'Set outputs but do not fail the workflow even if risk threshold exceeded'
+    required: false
+    default: 'false'
 
 outputs:
   total:

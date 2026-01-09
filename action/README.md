@@ -24,6 +24,7 @@ Get your API key at [dephealth.laranjo.dev](https://dephealth.laranjo.dev).
 | `working-directory` | No | `.` | Directory containing package.json |
 | `fail-on` | No | - | Fail if risk level reached: `HIGH` or `CRITICAL` |
 | `include-dev` | No | `true` | Include devDependencies in scan |
+| `soft-fail` | No | `false` | Set outputs but don't fail workflow even if threshold exceeded |
 
 ## Outputs
 
@@ -141,6 +142,27 @@ jobs:
   run: echo "::warning::HIGH risk dependencies detected"
 ```
 
+### Soft-Fail Mode
+
+Use `soft-fail: true` to set outputs and warnings without failing the workflow:
+
+```yaml
+- name: Scan dependencies (informational)
+  uses: dephealth/action@v1
+  with:
+    api-key: ${{ secrets.DEPHEALTH_API_KEY }}
+    fail-on: HIGH
+    soft-fail: true
+
+# Workflow continues even if HIGH risk packages are found
+# Outputs are still set and can be used in conditional steps
+```
+
+This is useful for:
+- Gradual rollout of dependency health checks
+- Informational scans that shouldn't block CI
+- Tracking health trends without enforcement
+
 ## Job Summary
 
 The action automatically generates a job summary with:
@@ -148,6 +170,14 @@ The action automatically generates a job summary with:
 - Summary counts by risk level
 - Table of packages requiring attention
 - Collapsible list of all packages
+
+## GitHub Annotations
+
+The action automatically creates GitHub annotations for all CRITICAL and HIGH risk packages. These annotations:
+- Appear in the Files Changed tab on pull requests
+- Show up in workflow run summaries
+- Include package name, risk level, and health score
+- Point to `package.json` for easy navigation
 
 ## Exit Codes
 

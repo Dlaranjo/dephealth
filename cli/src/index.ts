@@ -12,6 +12,7 @@
 import { program } from "commander";
 import pc from "picocolors";
 import ora, { type Ora } from "ora";
+import cliProgress from "cli-progress";
 import { readFileSync, existsSync } from "node:fs";
 import { resolve as resolvePath } from "node:path";
 import { createInterface } from "node:readline";
@@ -47,12 +48,35 @@ function logVerbose(message: string): void {
   if (verboseMode) console.log(pc.dim(`[verbose] ${message}`));
 }
 
+/**
+ * Check and display rate limit warning based on usage percentage.
+ */
+async function checkRateLimitWarning(client: DepHealthClient): Promise<void> {
+  if (quietMode) return;
+
+  try {
+    const data = await client.getUsage();
+    const usedPercent = data.usage.usage_percentage;
+    const remaining = data.usage.remaining;
+
+    if (usedPercent >= 95) {
+      console.log(pc.red(`\n⚠ Warning: ${remaining.toLocaleString()} requests remaining this month (${usedPercent.toFixed(0)}% used)`));
+      console.log(pc.dim("  Upgrade at https://dephealth.laranjo.dev/pricing"));
+    } else if (usedPercent >= 80) {
+      console.log(pc.yellow(`\n⚠ ${remaining.toLocaleString()} requests remaining this month (${usedPercent.toFixed(0)}% used)`));
+    }
+  } catch {
+    // Silently ignore errors when checking rate limits
+  }
+}
+
 import {
   DepHealthClient,
   ApiClientError,
   getRiskColor,
   type PackageHealthFull,
   type PackageHealth,
+  type ScanResult,
 } from "./api.js";
 import {
   getApiKey,
@@ -119,6 +143,34 @@ function formatNumber(n: number): string {
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
   if (n >= 1_000) return `${(n / 1_000).toFixed(1)}K`;
   return n.toString();
+}
+
+/**
+ * Convert scan results to SARIF format for security tooling integration.
+ */
+function toSarif(result: ScanResult): object {
+  return {
+    $schema: "https://raw.githubusercontent.com/oasis-tcs/sarif-spec/master/Schemata/sarif-schema-2.1.0.json",
+    version: "2.1.0",
+    runs: [{
+      tool: {
+        driver: {
+          name: "dephealth",
+          version: VERSION,
+          informationUri: "https://dephealth.laranjo.dev",
+        }
+      },
+      results: result.packages
+        .filter((p: PackageHealth) => p.risk_level === "CRITICAL" || p.risk_level === "HIGH")
+        .map((p: PackageHealth) => ({
+          ruleId: `dephealth/${p.risk_level.toLowerCase()}`,
+          level: p.risk_level === "CRITICAL" ? "error" : "warning",
+          message: {
+            text: `${p.package}: ${p.risk_level} risk (health score: ${p.health_score})`,
+          },
+        })),
+    }],
+  };
 }
 
 /**
@@ -250,6 +302,7 @@ program
 // ------------------------------------------------------------
 program
   .command("check <package>")
+  .alias("c")
   .description("Check health score for a single package")
   .option("--json", "Output as JSON")
   .action(async (packageName: string, options: { json?: boolean }) => {
@@ -267,6 +320,9 @@ program
         printPackageDetails(pkg);
       }
 
+      // Check rate limit and show warning if needed
+      await checkRateLimitWarning(client);
+
       process.exit(EXIT_SUCCESS);
     } catch (error) {
       spinner?.stop();
@@ -276,8 +332,14 @@ program
         } else {
           console.error(pc.red(`API Error: ${error.message}`));
         }
+      } else if (error instanceof Error) {
+        console.error(pc.red(`Unexpected error: ${error.message}`));
+        console.error(pc.dim("\nIf this persists, please report at:"));
+        console.error(pc.dim("  https://github.com/Dlaranjo/dephealth/issues"));
       } else {
-        console.error(pc.red(`Error: ${(error as Error).message}`));
+        console.error(pc.red(`Unexpected error: ${String(error)}`));
+        console.error(pc.dim("\nIf this persists, please report at:"));
+        console.error(pc.dim("  https://github.com/Dlaranjo/dephealth/issues"));
       }
       process.exit(EXIT_CLI_ERROR);
     }
@@ -288,10 +350,27 @@ program
 // ------------------------------------------------------------
 program
   .command("scan [path]")
+  .alias("s")
   .description("Scan dependencies in a package.json file")
-  .option("--json", "Output as JSON")
+  .option("--json", "Output as JSON (deprecated, use --output json)")
+  .option("-o, --output <format>", "Output format: table, json, sarif", "table")
   .option("--fail-on <level>", "Exit 1 if risk level reached (HIGH or CRITICAL)")
-  .action(async (path: string | undefined, options: { json?: boolean; failOn?: string }) => {
+  .action(async (path: string | undefined, options: { json?: boolean; output?: string; failOn?: string }) => {
+    // Handle backward compatibility: --json flag
+    let outputFormat = options.output || "table";
+    if (options.json) {
+      console.warn(pc.yellow("Warning: --json flag is deprecated. Use --output json instead."));
+      outputFormat = "json";
+    }
+
+    // Validate output format
+    const VALID_FORMATS = ["table", "json", "sarif"];
+    if (!VALID_FORMATS.includes(outputFormat)) {
+      console.error(pc.red(`Invalid output format: ${outputFormat}`));
+      console.error(`Valid options: ${VALID_FORMATS.join(", ")}`);
+      process.exit(EXIT_CLI_ERROR);
+    }
+
     // Validate --fail-on value
     const VALID_FAIL_ON = ["HIGH", "CRITICAL"];
     if (options.failOn && !VALID_FAIL_ON.includes(options.failOn.toUpperCase())) {
@@ -311,21 +390,77 @@ program
       process.exit(EXIT_SUCCESS);
     }
 
-    const spinner = options.json ? null : createSpinner(`Scanning ${depCount} dependencies...`);
     logVerbose(`Reading ${filePath}`);
 
-    try {
-      const result = await client.scan(dependencies);
-      spinner?.stop();
+    // Constants for progress bar and batching
+    const PROGRESS_BAR_THRESHOLD = 20;
+    const BATCH_SIZE = 25;
 
-      if (options.json) {
-        console.log(JSON.stringify(result, null, 2));
+    let result: ScanResult;
+
+    try {
+      // Use progress bar for large scans (20+ dependencies)
+      if (depCount >= PROGRESS_BAR_THRESHOLD && outputFormat === "table" && !quietMode) {
+        const progressBar = new cliProgress.SingleBar({
+          format: 'Scanning |{bar}| {percentage}% | {value}/{total} packages',
+          barCompleteChar: '█',
+          barIncompleteChar: '░',
+        });
+
+        progressBar.start(depCount, 0);
+
+        // Batch processing with progress updates
+        const depEntries = Object.entries(dependencies);
+        const allPackages: PackageHealth[] = [];
+        let notFound: string[] = [];
+
+        for (let i = 0; i < depEntries.length; i += BATCH_SIZE) {
+          const batchEntries = depEntries.slice(i, Math.min(i + BATCH_SIZE, depEntries.length));
+          const batchDeps = Object.fromEntries(batchEntries);
+
+          const batchResult = await client.scan(batchDeps);
+          allPackages.push(...batchResult.packages);
+          if (batchResult.not_found) {
+            notFound.push(...batchResult.not_found);
+          }
+
+          progressBar.update(Math.min(i + BATCH_SIZE, depEntries.length));
+        }
+
+        progressBar.stop();
+
+        // Aggregate results
+        result = {
+          total: allPackages.length,
+          critical: allPackages.filter((p: PackageHealth) => p.risk_level === "CRITICAL").length,
+          high: allPackages.filter((p: PackageHealth) => p.risk_level === "HIGH").length,
+          medium: allPackages.filter((p: PackageHealth) => p.risk_level === "MEDIUM").length,
+          low: allPackages.filter((p: PackageHealth) => p.risk_level === "LOW").length,
+          packages: allPackages,
+          not_found: notFound.length > 0 ? notFound : undefined,
+        };
       } else {
+        // Use spinner for smaller scans
+        const spinner = outputFormat !== "table" ? null : createSpinner(`Scanning ${depCount} dependencies...`);
+        result = await client.scan(dependencies);
+        spinner?.stop();
+      }
+
+      // Output results in requested format
+      switch (outputFormat) {
+        case "json":
+          console.log(JSON.stringify(result, null, 2));
+          break;
+        case "sarif":
+          console.log(JSON.stringify(toSarif(result), null, 2));
+          break;
+        case "table":
+        default:
         // Group by risk level
-        const critical = result.packages.filter((p) => p.risk_level === "CRITICAL");
-        const high = result.packages.filter((p) => p.risk_level === "HIGH");
-        const medium = result.packages.filter((p) => p.risk_level === "MEDIUM");
-        const low = result.packages.filter((p) => p.risk_level === "LOW");
+        const critical = result.packages.filter((p: PackageHealth) => p.risk_level === "CRITICAL");
+        const high = result.packages.filter((p: PackageHealth) => p.risk_level === "HIGH");
+        const medium = result.packages.filter((p: PackageHealth) => p.risk_level === "MEDIUM");
+        const low = result.packages.filter((p: PackageHealth) => p.risk_level === "LOW");
 
         if (critical.length > 0) {
           log(pc.red(pc.bold(`CRITICAL (${critical.length})`)));
@@ -358,7 +493,11 @@ program
         log(
           `Summary: ${pc.red(`${result.critical} critical`)}, ${pc.red(`${result.high} high`)}, ${pc.yellow(`${result.medium} medium`)}, ${pc.green(`${result.low} low`)}`
         );
+        break;
       }
+
+      // Check rate limit and show warning if needed
+      await checkRateLimitWarning(client);
 
       // Check fail-on threshold
       if (options.failOn) {
@@ -373,11 +512,17 @@ program
 
       process.exit(EXIT_SUCCESS);
     } catch (error) {
-      spinner?.stop();
+      // Error occurred - progress bar/spinner already stopped or will be handled by cli-progress
       if (error instanceof ApiClientError) {
         console.error(pc.red(`API Error: ${error.message}`));
+      } else if (error instanceof Error) {
+        console.error(pc.red(`Unexpected error: ${error.message}`));
+        console.error(pc.dim("\nIf this persists, please report at:"));
+        console.error(pc.dim("  https://github.com/Dlaranjo/dephealth/issues"));
       } else {
-        console.error(pc.red(`Error: ${(error as Error).message}`));
+        console.error(pc.red(`Unexpected error: ${String(error)}`));
+        console.error(pc.dim("\nIf this persists, please report at:"));
+        console.error(pc.dim("  https://github.com/Dlaranjo/dephealth/issues"));
       }
       process.exit(EXIT_CLI_ERROR);
     }
@@ -388,6 +533,7 @@ program
 // ------------------------------------------------------------
 program
   .command("usage")
+  .alias("u")
   .description("Show API usage statistics")
   .action(async () => {
     const client = getClient();
@@ -415,11 +561,69 @@ program
     } catch (error) {
       if (error instanceof ApiClientError) {
         console.error(pc.red(`API Error: ${error.message}`));
+      } else if (error instanceof Error) {
+        console.error(pc.red(`Unexpected error: ${error.message}`));
+        console.error(pc.dim("\nIf this persists, please report at:"));
+        console.error(pc.dim("  https://github.com/Dlaranjo/dephealth/issues"));
       } else {
-        console.error(pc.red(`Error: ${(error as Error).message}`));
+        console.error(pc.red(`Unexpected error: ${String(error)}`));
+        console.error(pc.dim("\nIf this persists, please report at:"));
+        console.error(pc.dim("  https://github.com/Dlaranjo/dephealth/issues"));
       }
       process.exit(EXIT_CLI_ERROR);
     }
+  });
+
+// ------------------------------------------------------------
+// doctor
+// ------------------------------------------------------------
+program
+  .command("doctor")
+  .description("Diagnose configuration and test API connectivity")
+  .action(async () => {
+    console.log(pc.bold("DepHealth Doctor\n"));
+
+    // Check 1: API key configured
+    const apiKey = getApiKey();
+    if (apiKey) {
+      console.log(pc.green("✓") + " API key configured");
+      console.log(pc.dim(`  Key: ${maskApiKey(apiKey)}`));
+    } else {
+      console.log(pc.red("✗") + " No API key configured");
+      console.log(pc.dim("  Run: dephealth config set"));
+      process.exit(EXIT_CLI_ERROR);
+    }
+
+    // Check 2: API connectivity
+    const spinner = createSpinner("Testing API connectivity...");
+    try {
+      const client = new DepHealthClient(apiKey);
+      const data = await client.getUsage();
+      spinner?.succeed("API connection successful");
+      console.log(pc.dim(`  Tier: ${data.tier}`));
+      console.log(pc.dim(`  Usage: ${data.usage.requests_this_month}/${data.usage.monthly_limit}`));
+    } catch (error) {
+      spinner?.fail("API connection failed");
+      if (error instanceof ApiClientError) {
+        console.log(pc.dim(`  Error: ${error.message}`));
+        if (error.code === "unauthorized") {
+          console.log(pc.dim("  Your API key may be invalid or expired"));
+        }
+      }
+      process.exit(EXIT_CLI_ERROR);
+    }
+
+    // Check 3: Node.js version
+    const nodeVersion = process.version;
+    const majorVersion = parseInt(nodeVersion.slice(1).split(".")[0]);
+    if (majorVersion >= 20) {
+      console.log(pc.green("✓") + ` Node.js ${nodeVersion}`);
+    } else {
+      console.log(pc.yellow("!") + ` Node.js ${nodeVersion} (20+ recommended)`);
+    }
+
+    console.log(pc.green("\n✓ All checks passed"));
+    process.exit(EXIT_SUCCESS);
   });
 
 // ------------------------------------------------------------
@@ -445,13 +649,36 @@ configCmd
       process.exit(EXIT_CLI_ERROR);
     }
 
+    // Validate key format
     if (!key.startsWith("dh_")) {
-      console.error(pc.yellow("Warning: API key should start with 'dh_'"));
+      console.error(pc.red("Invalid API key format. Keys should start with 'dh_'"));
+      process.exit(EXIT_CLI_ERROR);
     }
 
-    setApiKey(key);
-    console.log(pc.green("API key saved!"));
-    console.log(pc.dim(`Config file: ${getConfigPath()}`));
+    // Test the key
+    const spinner = createSpinner("Validating API key...");
+    try {
+      const client = new DepHealthClient(key);
+      const data = await client.getUsage();
+      spinner?.succeed("API key validated");
+
+      setApiKey(key);
+      console.log(pc.green("\nAPI key saved successfully!"));
+      console.log(pc.dim(`Tier: ${data.tier}`));
+      console.log(pc.dim(`Monthly limit: ${data.usage.monthly_limit.toLocaleString()} requests`));
+      console.log(pc.dim(`Config file: ${getConfigPath()}`));
+    } catch (error) {
+      spinner?.fail("API key validation failed");
+      if (error instanceof ApiClientError && error.code === "unauthorized") {
+        console.error(pc.red("\nInvalid API key. Please check your key and try again."));
+        console.error(pc.dim("Get your API key at https://dephealth.laranjo.dev"));
+      } else if (error instanceof Error) {
+        console.error(pc.red(`\nError: ${error.message}`));
+      } else {
+        console.error(pc.red(`\nError: ${String(error)}`));
+      }
+      process.exit(EXIT_CLI_ERROR);
+    }
     process.exit(EXIT_SUCCESS);
   });
 
@@ -490,6 +717,23 @@ configCmd
     console.log(pc.green("Configuration cleared."));
     process.exit(EXIT_SUCCESS);
   });
+
+// Add help text with exit codes and examples
+program.addHelpText('after', `
+Exit Codes:
+  0   Success
+  1   Risk threshold exceeded (with --fail-on)
+  2   CLI error (invalid arguments, missing config)
+
+Examples:
+  dephealth check lodash              Check single package
+  dephealth c lodash                  Check with alias
+  dephealth scan --fail-on HIGH       Scan and fail on HIGH+ risk
+  dephealth scan ./packages/frontend  Scan specific directory
+  dephealth scan -o json              Output as JSON
+  dephealth scan -o sarif             Output as SARIF
+  dephealth doctor                    Diagnose configuration issues
+`);
 
 // Parse and run
 program.parse();
