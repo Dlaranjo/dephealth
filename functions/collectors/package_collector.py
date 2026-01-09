@@ -97,12 +97,12 @@ def validate_message(body: dict) -> Tuple[bool, Optional[str]]:
     if len(name) > MAX_PACKAGE_NAME_LENGTH:
         return False, f"Package name too long: {len(name)} > {MAX_PACKAGE_NAME_LENGTH}"
 
-    if not NPM_PACKAGE_PATTERN.match(name):
-        return False, "Invalid package name format"
-
-    # Check for path traversal attempts
+    # Check for path traversal attempts first (security check)
     if ".." in name or name.startswith("/"):
         return False, "Invalid package name (path traversal detected)"
+
+    if not NPM_PACKAGE_PATTERN.match(name):
+        return False, "Invalid package name format"
 
     return True, None
 

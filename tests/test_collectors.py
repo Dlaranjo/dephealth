@@ -2112,7 +2112,7 @@ class TestMessageValidation:
         is_valid, error = validate_message(message)
 
         assert is_valid is False
-        assert "path traversal" in error
+        assert "path traversal detected" in error
 
 
 class TestRateLimitAtomicOperation:
