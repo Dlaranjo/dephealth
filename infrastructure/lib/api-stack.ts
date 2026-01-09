@@ -335,16 +335,12 @@ export class ApiStack extends cdk.Stack {
         cacheClusterEnabled: true,
         cacheClusterSize: "0.5", // 0.5 GB cache (~$15-20/month)
         cacheTtl: cdk.Duration.minutes(5),
-        // Per-method cache settings
+        // Per-method cache settings (path parameters are included by default)
         methodOptions: {
           "/packages/{ecosystem}/{name}/GET": {
             cachingEnabled: true,
             cacheTtl: cdk.Duration.minutes(5),
             cacheDataEncrypted: true,
-            cacheKeyParameters: [
-              "method.request.path.ecosystem",
-              "method.request.path.name",
-            ],
           },
         },
       },
