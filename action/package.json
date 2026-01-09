@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "build": "esbuild src/index.ts --bundle --platform=node --target=node20 --minify --sourcemap --outfile=dist/index.js --define:__VERSION__=\\\"$(node -p \"require('./package.json').version\")\\\"",
+    "build": "esbuild src/index.ts --bundle --platform=node --target=node20 --format=cjs --minify --sourcemap --outfile=dist/index.js --define:__VERSION__=\\\"$(node -p \"require('./package.json').version\")\\\"",
     "test": "vitest run",
     "lint": "tsc --noEmit"
   },
