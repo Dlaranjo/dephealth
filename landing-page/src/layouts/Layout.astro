@@ -4,9 +4,16 @@ import '../styles/global.css'
 interface Props {
   title: string
   description?: string
+  image?: string
+  canonical?: string
 }
 
-const { title, description = 'Predictive health scores for npm packages. Get warned about abandonment risk months before it becomes a problem.' } = Astro.props
+const {
+  title,
+  description = 'Predict which npm dependencies are at risk of abandonment. Get health scores and risk assessments for your packages.',
+  image = 'https://dephealth.laranjo.dev/og-image.png',
+  canonical = Astro.url.href,
+} = Astro.props
 ---
 
 <!doctype html>
@@ -14,20 +21,33 @@ const { title, description = 'Predictive health scores for npm packages. Get war
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta name="description" content={description} />
 
-    <!-- Open Graph -->
+    <!-- Primary Meta Tags -->
+    <title>{title}</title>
+    <meta name="title" content={title} />
+    <meta name="description" content={description} />
+    <link rel="canonical" href={canonical} />
+
+    <!-- Open Graph / Facebook -->
+    <meta property="og:type" content="website" />
+    <meta property="og:url" content={canonical} />
     <meta property="og:title" content={title} />
     <meta property="og:description" content={description} />
-    <meta property="og:type" content="website" />
-    <meta property="og:url" content="https://dephealth.laranjo.dev" />
+    <meta property="og:image" content={image} />
+    <meta property="og:site_name" content="DepHealth" />
 
     <!-- Twitter -->
     <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:url" content={canonical} />
     <meta name="twitter:title" content={title} />
     <meta name="twitter:description" content={description} />
+    <meta name="twitter:image" content={image} />
+
+    <!-- Robots -->
+    <meta name="robots" content="index, follow" />
 
     <!-- Favicon -->
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🛡️</text></svg>" />
 
     <!-- Fonts -->
@@ -35,9 +55,31 @@ const { title, description = 'Predictive health scores for npm packages. Get war
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
 
-    <title>{title}</title>
+    <!-- Analytics -->
+    <script
+      defer
+      data-domain="dephealth.laranjo.dev"
+      src="https://plausible.io/js/script.js"
+    ></script>
+
+    <!-- Track outbound links -->
+    <script
+      defer
+      data-domain="dephealth.laranjo.dev"
+      src="https://plausible.io/js/script.outbound-links.js"
+    ></script>
   </head>
   <body class="min-h-screen overflow-x-hidden">
+    <!-- Skip to main content link -->
+    <a
+      href="#main-content"
+      class="sr-only focus:not-sr-only focus:absolute focus:top-4 focus:left-4
+             focus:z-50 focus:px-4 focus:py-2 focus:bg-emerald-500 focus:text-white
+             focus:rounded"
+    >
+      Skip to main content
+    </a>
+
     <!-- Background gradient -->
     <div class="fixed inset-0 pointer-events-none -z-10">
       <div class="absolute inset-0 bg-[radial-gradient(ellipse_80%_50%_at_50%_-20%,rgba(59,130,246,0.15),transparent)]"></div>

@@ -1,0 +1,158 @@
+---
+import Layout from '../layouts/Layout.astro';
+import Navbar from '../components/Navbar.astro';
+import Footer from '../components/Footer.astro';
+
+const tiers = [
+  {
+    name: 'Free',
+    price: '$0',
+    period: 'forever',
+    description: 'Perfect for trying out DepHealth',
+    features: [
+      '5,000 requests/month',
+      'Health scores & risk levels',
+      'CLI & GitHub Action',
+      'Community support',
+    ],
+    cta: 'Get Started',
+    ctaLink: '/signup',
+    highlighted: false,
+  },
+  {
+    name: 'Pro',
+    price: '$29',
+    period: '/month',
+    description: 'For teams with growing needs',
+    features: [
+      '100,000 requests/month',
+      'Everything in Free',
+      'Priority API access',
+      'Email support',
+      'Usage analytics',
+    ],
+    cta: 'Coming Soon',
+    ctaLink: '#',
+    highlighted: true,
+  },
+  {
+    name: 'Business',
+    price: '$99',
+    period: '/month',
+    description: 'For organizations at scale',
+    features: [
+      '500,000 requests/month',
+      'Everything in Pro',
+      'SLA guarantee',
+      'Dedicated support',
+      'Custom integrations',
+    ],
+    cta: 'Coming Soon',
+    ctaLink: '#',
+    highlighted: false,
+  },
+];
+---
+
+<Layout title="Pricing | DepHealth">
+  <Navbar />
+
+  <main class="max-w-5xl mx-auto px-4 py-24 pt-32">
+    <div class="text-center mb-16">
+      <h1 class="text-4xl font-bold text-white mb-4">
+        Simple, transparent pricing
+      </h1>
+      <p class="text-xl text-zinc-400">
+        Start free, upgrade as you grow
+      </p>
+    </div>
+
+    <div class="grid md:grid-cols-3 gap-8">
+      {tiers.map((tier) => (
+        <div
+          class={`rounded-2xl p-8 ${
+            tier.highlighted
+              ? 'bg-gradient-to-b from-emerald-500/20 to-transparent border-2 border-emerald-500/50'
+              : 'bg-zinc-900/50 border border-zinc-800'
+          }`}
+        >
+          <h3 class="text-xl font-semibold text-white mb-2">{tier.name}</h3>
+          <div class="mb-4">
+            <span class="text-4xl font-bold text-white">{tier.price}</span>
+            <span class="text-zinc-400">{tier.period}</span>
+          </div>
+          <p class="text-zinc-400 mb-6">{tier.description}</p>
+
+          <ul class="space-y-3 mb-8">
+            {tier.features.map((feature) => (
+              <li class="flex items-center gap-2 text-zinc-300">
+                <svg class="w-5 h-5 text-emerald-400" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
+                </svg>
+                {feature}
+              </li>
+            ))}
+          </ul>
+
+          <a
+            href={tier.ctaLink}
+            class={`block w-full text-center px-6 py-3 rounded-lg font-semibold transition ${
+              tier.highlighted
+                ? 'btn-gradient text-white'
+                : 'bg-zinc-800 text-white hover:bg-zinc-700'
+            } ${tier.cta === 'Coming Soon' ? 'opacity-50 cursor-not-allowed' : ''}`}
+          >
+            {tier.cta}
+          </a>
+        </div>
+      ))}
+    </div>
+
+    <!-- FAQ -->
+    <div class="mt-24">
+      <h2 class="text-2xl font-bold text-white text-center mb-12">
+        Frequently Asked Questions
+      </h2>
+      <div class="grid md:grid-cols-2 gap-8">
+        <div>
+          <h3 class="text-lg font-semibold text-white mb-2">
+            What counts as a request?
+          </h3>
+          <p class="text-zinc-400">
+            Each API call counts as one request. A scan of 100 dependencies
+            counts as one request, not 100.
+          </p>
+        </div>
+        <div>
+          <h3 class="text-lg font-semibold text-white mb-2">
+            Can I upgrade or downgrade anytime?
+          </h3>
+          <p class="text-zinc-400">
+            Yes, you can change your plan at any time. Upgrades take effect
+            immediately, downgrades at the end of your billing period.
+          </p>
+        </div>
+        <div>
+          <h3 class="text-lg font-semibold text-white mb-2">
+            What happens if I exceed my limit?
+          </h3>
+          <p class="text-zinc-400">
+            Requests beyond your limit will be rejected with a 429 status code.
+            You can upgrade anytime to increase your limit.
+          </p>
+        </div>
+        <div>
+          <h3 class="text-lg font-semibold text-white mb-2">
+            Do you offer enterprise plans?
+          </h3>
+          <p class="text-zinc-400">
+            Yes! Contact us at hello@laranjo.dev for custom enterprise pricing
+            with higher limits and dedicated support.
+          </p>
+        </div>
+      </div>
+    </div>
+  </main>
+
+  <Footer />
+</Layout>
