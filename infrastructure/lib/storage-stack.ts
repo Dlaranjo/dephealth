@@ -22,7 +22,9 @@ export class StorageStack extends cdk.Stack {
       partitionKey: { name: "pk", type: dynamodb.AttributeType.STRING },
       sortKey: { name: "sk", type: dynamodb.AttributeType.STRING },
       billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
-      pointInTimeRecovery: true,
+      pointInTimeRecoverySpecification: {
+        pointInTimeRecoveryEnabled: true,
+      },
       removalPolicy: cdk.RemovalPolicy.RETAIN,
       // Enable streams for score calculation trigger
       stream: dynamodb.StreamViewType.NEW_IMAGE,
@@ -57,7 +59,9 @@ export class StorageStack extends cdk.Stack {
       partitionKey: { name: "pk", type: dynamodb.AttributeType.STRING },
       sortKey: { name: "sk", type: dynamodb.AttributeType.STRING },
       billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
-      pointInTimeRecovery: true,
+      pointInTimeRecoverySpecification: {
+        pointInTimeRecoveryEnabled: true,
+      },
       removalPolicy: cdk.RemovalPolicy.RETAIN,
     });
 
@@ -111,8 +115,9 @@ export class StorageStack extends cdk.Stack {
       blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
       lifecycleRules: [
         {
-          // Delete raw data after 30 days (we only need it for debugging)
-          expiration: cdk.Duration.days(30),
+          // Delete raw data after 7 days (we only need it for debugging)
+          // Reduced from 30 days for cost optimization
+          expiration: cdk.Duration.days(7),
           enabled: true,
         },
       ],
