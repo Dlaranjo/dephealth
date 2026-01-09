@@ -25,6 +25,25 @@ NPM_REGISTRY = "https://registry.npmjs.org"
 NPM_API = "https://api.npmjs.org"
 DEFAULT_TIMEOUT = 30.0
 
+# Module-level HTTP client for connection pooling
+_http_client: Optional[httpx.AsyncClient] = None
+
+
+def get_http_client() -> httpx.AsyncClient:
+    """Get or create shared HTTP client with connection pooling."""
+    global _http_client
+    if _http_client is None:
+        _http_client = httpx.AsyncClient(
+            timeout=45.0,
+            limits=httpx.Limits(
+                max_keepalive_connections=20,
+                max_connections=100,
+                keepalive_expiry=30.0,
+            ),
+            http2=True,  # Enable HTTP/2 multiplexing
+        )
+    return _http_client
+
 
 def encode_scoped_package(name: str) -> str:
     """
@@ -49,7 +68,9 @@ async def retry_with_backoff(
     base_delay: float = 1.0,
     **kwargs,
 ):
-    """Retry async function with exponential backoff."""
+    """Retry async function with exponential backoff and jitter."""
+    import random
+
     last_exception = None
 
     for attempt in range(max_retries):
@@ -61,8 +82,10 @@ async def retry_with_backoff(
                 logger.error(f"Failed after {max_retries} retries: {e}")
                 raise
 
-            delay = base_delay * (2**attempt)
-            logger.warning(f"Attempt {attempt + 1} failed, retrying in {delay}s: {e}")
+            base = base_delay * (2**attempt)
+            jitter = random.uniform(0, base * 0.3)  # 0-30% jitter
+            delay = base + jitter
+            logger.warning(f"Attempt {attempt + 1} failed, retrying in {delay:.2f}s: {e}")
             await asyncio.sleep(delay)
 
     raise last_exception
@@ -85,106 +108,107 @@ async def get_npm_metadata(name: str) -> dict:
         - weekly_downloads
         - repository_url
     """
-    async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT) as client:
-        # 1. Package metadata from registry
-        # Use abbreviated metadata endpoint for faster response
-        # URL-encode scoped packages (e.g., @babel/core -> @babel%2Fcore)
-        encoded_name = encode_scoped_package(name)
-        registry_url = f"{NPM_REGISTRY}/{encoded_name}"
-        headers = {"Accept": "application/json"}
+    client = get_http_client()
 
-        try:
-            resp = await retry_with_backoff(client.get, registry_url, headers=headers)
-            resp.raise_for_status()
-            data = resp.json()
-        except httpx.HTTPStatusError as e:
-            if e.response.status_code == 404:
-                logger.warning(f"Package not found: {name}")
-                return {"error": "package_not_found", "name": name}
-            raise
+    # 1. Package metadata from registry
+    # Use abbreviated metadata endpoint for faster response
+    # URL-encode scoped packages (e.g., @babel/core -> @babel%2Fcore)
+    encoded_name = encode_scoped_package(name)
+    registry_url = f"{NPM_REGISTRY}/{encoded_name}"
+    headers = {"Accept": "application/json"}
 
-        # Extract latest version
-        latest = data.get("dist-tags", {}).get("latest", "")
-        time_data = data.get("time", {})
+    try:
+        resp = await retry_with_backoff(client.get, registry_url, headers=headers)
+        resp.raise_for_status()
+        data = resp.json()
+    except httpx.HTTPStatusError as e:
+        if e.response.status_code == 404:
+            logger.warning(f"Package not found: {name}")
+            return {"error": "package_not_found", "name": name}
+        raise
 
-        # Check deprecation status and extract version-specific fields
-        is_deprecated = False
-        deprecation_message = None
-        has_types = False
-        module_type = "commonjs"
-        has_exports = False
-        engines = None
+    # Extract latest version
+    latest = data.get("dist-tags", {}).get("latest", "")
+    time_data = data.get("time", {})
 
-        if latest and "versions" in data:
-            version_info = data.get("versions", {}).get(latest, {})
+    # Check deprecation status and extract version-specific fields
+    is_deprecated = False
+    deprecation_message = None
+    has_types = False
+    module_type = "commonjs"
+    has_exports = False
+    engines = None
 
-            # Deprecation
-            deprecated_field = version_info.get("deprecated")
-            if deprecated_field:
-                is_deprecated = True
-                deprecation_message = deprecated_field if isinstance(deprecated_field, str) else None
+    if latest and "versions" in data:
+        version_info = data.get("versions", {}).get(latest, {})
 
-            # TypeScript support detection
-            has_types = bool(version_info.get("types") or version_info.get("typings"))
+        # Deprecation
+        deprecated_field = version_info.get("deprecated")
+        if deprecated_field:
+            is_deprecated = True
+            deprecation_message = deprecated_field if isinstance(deprecated_field, str) else None
 
-            # Module system detection (ESM vs CJS)
-            module_type = version_info.get("type", "commonjs")
-            has_exports = "exports" in version_info
+        # TypeScript support detection
+        has_types = bool(version_info.get("types") or version_info.get("typings"))
 
-            # Node.js engine requirements
-            engines = version_info.get("engines")
+        # Module system detection (ESM vs CJS)
+        module_type = version_info.get("type", "commonjs")
+        has_exports = "exports" in version_info
 
-        # Get maintainers
-        maintainers = [m.get("name") for m in data.get("maintainers", []) if m.get("name")]
+        # Node.js engine requirements
+        engines = version_info.get("engines")
 
-        # Get repository URL
-        repository = data.get("repository", {})
-        if isinstance(repository, str):
-            repository_url = repository
-        else:
-            repository_url = repository.get("url", "")
+    # Get maintainers
+    maintainers = [m.get("name") for m in data.get("maintainers", []) if m.get("name")]
 
-        # Clean up repository URL
-        if repository_url:
-            repository_url = (
-                repository_url.replace("git+", "")
-                .replace("git://", "https://")
-                .replace(".git", "")
-            )
+    # Get repository URL
+    repository = data.get("repository", {})
+    if isinstance(repository, str):
+        repository_url = repository
+    else:
+        repository_url = repository.get("url", "")
 
-        # 2. Download statistics (separate API)
-        weekly_downloads = 0
-        try:
-            downloads_url = f"{NPM_API}/downloads/point/last-week/{name}"
-            downloads_resp = await retry_with_backoff(client.get, downloads_url)
-            downloads_resp.raise_for_status()
-            weekly_downloads = downloads_resp.json().get("downloads", 0)
-        except httpx.HTTPStatusError:
-            logger.debug(f"Could not fetch download stats for {name}")
+    # Clean up repository URL
+    if repository_url:
+        repository_url = (
+            repository_url.replace("git+", "")
+            .replace("git://", "https://")
+            .replace(".git", "")
+        )
 
-        return {
-            "name": name,
-            "latest_version": latest,
-            "created_at": time_data.get("created"),
-            "last_published": time_data.get(latest) or time_data.get("modified"),
-            "maintainers": maintainers,
-            "maintainer_count": len(maintainers),
-            "is_deprecated": is_deprecated,
-            "deprecation_message": deprecation_message,
-            "weekly_downloads": weekly_downloads,
-            "repository_url": repository_url,
-            "license": data.get("license"),
-            "description": data.get("description", ""),
-            "keywords": data.get("keywords", []),
-            # TypeScript support
-            "has_types": has_types,
-            # Module system
-            "module_type": module_type,
-            "has_exports": has_exports,
-            # Engine requirements
-            "engines": engines,
-            "source": "npm",
-        }
+    # 2. Download statistics (separate API)
+    weekly_downloads = 0
+    try:
+        downloads_url = f"{NPM_API}/downloads/point/last-week/{name}"
+        downloads_resp = await retry_with_backoff(client.get, downloads_url)
+        downloads_resp.raise_for_status()
+        weekly_downloads = downloads_resp.json().get("downloads", 0)
+    except httpx.HTTPStatusError:
+        logger.debug(f"Could not fetch download stats for {name}")
+
+    return {
+        "name": name,
+        "latest_version": latest,
+        "created_at": time_data.get("created"),
+        "last_published": time_data.get(latest) or time_data.get("modified"),
+        "maintainers": maintainers,
+        "maintainer_count": len(maintainers),
+        "is_deprecated": is_deprecated,
+        "deprecation_message": deprecation_message,
+        "weekly_downloads": weekly_downloads,
+        "repository_url": repository_url,
+        "license": data.get("license"),
+        "description": data.get("description", ""),
+        "keywords": data.get("keywords", []),
+        # TypeScript support
+        "has_types": has_types,
+        # Module system
+        "module_type": module_type,
+        "has_exports": has_exports,
+        # Engine requirements
+        "engines": engines,
+        "source": "npm",
+    }
 
 
 async def get_download_stats(name: str, period: str = "last-week") -> dict:
@@ -198,20 +222,20 @@ async def get_download_stats(name: str, period: str = "last-week") -> dict:
     Returns:
         Dictionary with download count and period
     """
-    async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT) as client:
-        url = f"{NPM_API}/downloads/point/{period}/{name}"
-        try:
-            resp = await retry_with_backoff(client.get, url)
-            resp.raise_for_status()
-            data = resp.json()
-            return {
-                "downloads": data.get("downloads", 0),
-                "start": data.get("start"),
-                "end": data.get("end"),
-                "package": name,
-            }
-        except httpx.HTTPStatusError:
-            return {"downloads": 0, "package": name, "error": "fetch_failed"}
+    client = get_http_client()
+    url = f"{NPM_API}/downloads/point/{period}/{name}"
+    try:
+        resp = await retry_with_backoff(client.get, url)
+        resp.raise_for_status()
+        data = resp.json()
+        return {
+            "downloads": data.get("downloads", 0),
+            "start": data.get("start"),
+            "end": data.get("end"),
+            "package": name,
+        }
+    except httpx.HTTPStatusError:
+        return {"downloads": 0, "package": name, "error": "fetch_failed"}
 
 
 async def get_bulk_download_stats(packages: list[str], period: str = "last-week") -> dict:
@@ -228,35 +252,35 @@ async def get_bulk_download_stats(packages: list[str], period: str = "last-week"
         Dictionary mapping package names to download counts
     """
     results = {}
+    client = get_http_client()
 
     # Process in batches of 128
     batch_size = 128
-    async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT) as client:
-        for i in range(0, len(packages), batch_size):
-            batch = packages[i : i + batch_size]
-            scoped = [p for p in batch if p.startswith("@")]
-            unscoped = [p for p in batch if not p.startswith("@")]
+    for i in range(0, len(packages), batch_size):
+        batch = packages[i : i + batch_size]
+        scoped = [p for p in batch if p.startswith("@")]
+        unscoped = [p for p in batch if not p.startswith("@")]
 
-            # Unscoped packages can use bulk endpoint
-            if unscoped:
-                packages_str = ",".join(unscoped)
-                url = f"{NPM_API}/downloads/point/{period}/{packages_str}"
-                try:
-                    resp = await retry_with_backoff(client.get, url)
-                    resp.raise_for_status()
-                    data = resp.json()
-                    for pkg_name, pkg_data in data.items():
-                        if pkg_data:
-                            results[pkg_name] = pkg_data.get("downloads", 0)
-                except httpx.HTTPStatusError:
-                    # Fall back to individual requests
-                    for pkg in unscoped:
-                        stats = await get_download_stats(pkg, period)
-                        results[pkg] = stats.get("downloads", 0)
+        # Unscoped packages can use bulk endpoint
+        if unscoped:
+            packages_str = ",".join(unscoped)
+            url = f"{NPM_API}/downloads/point/{period}/{packages_str}"
+            try:
+                resp = await retry_with_backoff(client.get, url)
+                resp.raise_for_status()
+                data = resp.json()
+                for pkg_name, pkg_data in data.items():
+                    if pkg_data:
+                        results[pkg_name] = pkg_data.get("downloads", 0)
+            except httpx.HTTPStatusError:
+                # Fall back to individual requests
+                for pkg in unscoped:
+                    stats = await get_download_stats(pkg, period)
+                    results[pkg] = stats.get("downloads", 0)
 
-            # Scoped packages must be fetched individually
-            for pkg in scoped:
-                stats = await get_download_stats(pkg, period)
-                results[pkg] = stats.get("downloads", 0)
+        # Scoped packages must be fetched individually
+        for pkg in scoped:
+            stats = await get_download_stats(pkg, period)
+            results[pkg] = stats.get("downloads", 0)
 
     return results

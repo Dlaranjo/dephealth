@@ -5,11 +5,13 @@ Scans a package.json file and returns health scores for all dependencies.
 Requires API key authentication.
 """
 
+import asyncio
 import json
 import logging
 import os
 import random
 import time
+from concurrent.futures import ThreadPoolExecutor
 from decimal import Decimal
 import boto3
 
@@ -20,8 +22,47 @@ logger.setLevel(logging.INFO)
 from shared.auth import validate_api_key, check_and_increment_usage_batch
 from shared.response_utils import error_response, decimal_default
 
-dynamodb = boto3.resource("dynamodb")
 PACKAGES_TABLE = os.environ.get("PACKAGES_TABLE", "dephealth-packages")
+
+# Lazy initialization of boto3 clients
+_dynamodb = None
+_packages_table = None
+
+
+def get_packages_table():
+    """Lazy initialize DynamoDB packages table."""
+    global _dynamodb, _packages_table
+    if _packages_table is None:
+        _dynamodb = boto3.resource("dynamodb")
+        _packages_table = _dynamodb.Table(PACKAGES_TABLE)
+    return _packages_table
+
+
+def _batch_get_sync(batch_keys: list) -> dict:
+    """Synchronous batch get for thread pool."""
+    dynamodb = boto3.resource("dynamodb")
+    response = dynamodb.batch_get_item(
+        RequestItems={PACKAGES_TABLE: {"Keys": batch_keys}}
+    )
+    return response
+
+
+async def _batch_get_all(all_keys: list) -> list:
+    """Fetch all batches concurrently using thread pool."""
+    loop = asyncio.get_event_loop()
+
+    # Split into batches of 25 (DynamoDB limit)
+    batches = [all_keys[i:i + 25] for i in range(0, len(all_keys), 25)]
+
+    # Use thread pool for concurrent boto3 calls (boto3 is not async-native)
+    with ThreadPoolExecutor(max_workers=10) as executor:
+        tasks = [
+            loop.run_in_executor(executor, _batch_get_sync, batch)
+            for batch in batches
+        ]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+
+    return results
 
 
 def handler(event, context):
@@ -82,68 +123,45 @@ def handler(event, context):
         )
     remaining = user["monthly_limit"] - new_count
 
-    # Fetch scores for all dependencies using BatchGetItem for efficiency
+    # Fetch scores for all dependencies using concurrent batch reads
     results = []
     not_found = []
 
-    # Process in batches of 25 (DynamoDB BatchGetItem limit)
+    # Build all keys
     dep_list = list(dependencies)
-    for i in range(0, len(dep_list), 25):
-        batch = dep_list[i:i + 25]
-        batch_set = set(batch)  # Track which packages we've processed
+    all_keys = [{"pk": f"npm#{name}", "sk": "LATEST"} for name in dep_list]
+    dep_set = set(dep_list)  # Track which packages we've processed
 
-        try:
-            request_items = {
-                PACKAGES_TABLE: {
-                    "Keys": [{"pk": f"npm#{name}", "sk": "LATEST"} for name in batch]
-                }
-            }
+    # Run concurrent batches using asyncio
+    loop = asyncio.new_event_loop()
+    try:
+        batch_results = loop.run_until_complete(_batch_get_all(all_keys))
+    finally:
+        loop.close()
 
-            # Retry loop for UnprocessedKeys (with exponential backoff)
-            max_retries = 3
-            retry_delay = 0.1  # 100ms initial delay
+    # Process results from all batches
+    for batch_response in batch_results:
+        if isinstance(batch_response, Exception):
+            logger.error(f"Batch request failed: {batch_response}")
+            continue
 
-            for attempt in range(max_retries + 1):
-                response = dynamodb.batch_get_item(RequestItems=request_items)
+        # Process found items
+        for item in batch_response.get("Responses", {}).get(PACKAGES_TABLE, []):
+            package_name = item["pk"].split("#", 1)[1]
+            if package_name in dep_set:
+                dep_set.discard(package_name)
+                results.append({
+                    "package": package_name,
+                    "health_score": item.get("health_score"),
+                    "risk_level": item.get("risk_level"),
+                    "abandonment_risk": item.get("abandonment_risk", {}),
+                    "is_deprecated": item.get("is_deprecated", False),
+                    "archived": item.get("archived", False),
+                    "last_updated": item.get("last_updated"),
+                })
 
-                # Process found items
-                for item in response.get("Responses", {}).get(PACKAGES_TABLE, []):
-                    package_name = item["pk"].split("#", 1)[1]
-                    if package_name in batch_set:
-                        batch_set.discard(package_name)
-                        results.append({
-                            "package": package_name,
-                            "health_score": item.get("health_score"),
-                            "risk_level": item.get("risk_level"),
-                            "abandonment_risk": item.get("abandonment_risk", {}),
-                            "is_deprecated": item.get("is_deprecated", False),
-                            "archived": item.get("archived", False),
-                            "last_updated": item.get("last_updated"),
-                        })
-
-                # Check for unprocessed keys
-                unprocessed = response.get("UnprocessedKeys", {})
-                if not unprocessed:
-                    break  # All items processed
-
-                if attempt < max_retries:
-                    # Exponential backoff with jitter to prevent thundering herd
-                    jitter = random.uniform(0, retry_delay * 0.1)
-                    time.sleep(retry_delay + jitter)
-                    retry_delay *= 2
-                    request_items = unprocessed
-                    logger.warning(f"Retrying {len(unprocessed.get(PACKAGES_TABLE, {}).get('Keys', []))} unprocessed keys (attempt {attempt + 2})")
-                else:
-                    # Max retries exceeded, log warning
-                    logger.error(f"Max retries exceeded for batch_get_item, {len(unprocessed.get(PACKAGES_TABLE, {}).get('Keys', []))} keys unprocessed")
-
-            # Any remaining items in batch_set were not found
-            not_found.extend(batch_set)
-
-        except Exception as e:
-            logger.error(f"Error in batch fetch: {e}")
-            # Fall back to marking remaining items as not found on batch error
-            not_found.extend(batch_set)
+    # Any remaining items in dep_set were not found
+    not_found.extend(dep_set)
 
     # Usage was already atomically reserved at the start of the request
     # based on len(dependencies) - this prevents race conditions

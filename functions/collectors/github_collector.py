@@ -26,6 +26,25 @@ logger.setLevel(logging.INFO)
 GITHUB_API = "https://api.github.com"
 DEFAULT_TIMEOUT = 30.0
 
+# Module-level HTTP client for connection pooling
+_http_client: Optional[httpx.AsyncClient] = None
+
+
+def get_http_client() -> httpx.AsyncClient:
+    """Get or create shared HTTP client with connection pooling."""
+    global _http_client
+    if _http_client is None:
+        _http_client = httpx.AsyncClient(
+            timeout=45.0,
+            limits=httpx.Limits(
+                max_keepalive_connections=20,
+                max_connections=100,
+                keepalive_expiry=30.0,
+            ),
+            http2=True,  # Enable HTTP/2 multiplexing
+        )
+    return _http_client
+
 
 def parse_github_url(url: str) -> Optional[tuple[str, str]]:
     """
@@ -153,8 +172,11 @@ class GitHubCollector:
                     logger.error(f"Failed after {max_retries} retries: {url} - {e}")
                     raise
 
-            # Exponential backoff
-            delay = 2**attempt
+            # Exponential backoff with jitter
+            import random
+            base = 2**attempt
+            jitter = random.uniform(0, base * 0.3)  # 0-30% jitter
+            delay = base + jitter
             await asyncio.sleep(delay)
 
         return None
@@ -175,142 +197,143 @@ class GitHubCollector:
         Returns:
             Dictionary with repository metrics
         """
-        async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT) as client:
-            # 1. Repository metadata (1 call)
-            repo_url = f"{GITHUB_API}/repos/{owner}/{repo}"
-            repo_data = await self._request_with_retry(client, repo_url)
+        client = get_http_client()
 
-            if repo_data is None:
-                return {
-                    "error": "repository_not_found",
-                    "owner": owner,
-                    "repo": repo,
-                }
+        # 1. Repository metadata (1 call)
+        repo_url = f"{GITHUB_API}/repos/{owner}/{repo}"
+        repo_data = await self._request_with_retry(client, repo_url)
 
-            # 2. Recent commits (1 call - last 90 days)
-            since = (datetime.now(timezone.utc) - timedelta(days=90)).isoformat()
-            commits_url = f"{GITHUB_API}/repos/{owner}/{repo}/commits"
-            commits = await self._request_with_retry(
-                client,
-                commits_url,
-                params={"since": since, "per_page": 100},
-            )
-            commits = commits or []
-
-            # 3. Contributors (1 call)
-            contributors_url = f"{GITHUB_API}/repos/{owner}/{repo}/contributors"
-            contributors = await self._request_with_retry(
-                client,
-                contributors_url,
-                params={"per_page": 100},
-            )
-            contributors = contributors or []
-
-            # Calculate derived metrics
-            unique_committers_90d = 0
-            true_bus_factor = 1
-            bus_factor_confidence = "LOW"
-            contribution_distribution = []
-
-            if isinstance(commits, list):
-                # Count commits per author (not just unique authors)
-                committers: dict[str, int] = {}
-                for c in commits:
-                    if isinstance(c, dict):
-                        author = c.get("author")
-                        if author and isinstance(author, dict):
-                            login = author.get("login")
-                            if login:
-                                committers[login] = committers.get(login, 0) + 1
-
-                unique_committers_90d = len(committers)
-
-                # Calculate true bus factor: minimum contributors for 50% of commits
-                if committers:
-                    total_commits = sum(committers.values())
-                    sorted_counts = sorted(committers.values(), reverse=True)
-
-                    cumulative = 0
-                    true_bus_factor = 0
-                    for count in sorted_counts:
-                        cumulative += count
-                        true_bus_factor += 1
-                        if cumulative >= total_commits * 0.5:
-                            break
-
-                    # Ensure at least 1
-                    true_bus_factor = max(1, true_bus_factor)
-
-                    # Confidence based on sample size
-                    if total_commits >= 100:
-                        bus_factor_confidence = "HIGH"
-                    elif total_commits >= 30:
-                        bus_factor_confidence = "MEDIUM"
-                    else:
-                        bus_factor_confidence = "LOW"
-
-                    # Top 10 contributors for distribution insight
-                    sorted_contributors = sorted(
-                        committers.items(), key=lambda x: -x[1]
-                    )[:10]
-                    contribution_distribution = [
-                        {"login": login, "commits": count}
-                        for login, count in sorted_contributors
-                    ]
-
-            # Days since last commit
-            days_since_commit = 999
-            if commits and isinstance(commits, list) and len(commits) > 0:
-                first_commit = commits[0]
-                if isinstance(first_commit, dict):
-                    commit_info = first_commit.get("commit", {})
-                    author_info = commit_info.get("author", {})
-                    last_commit_date = author_info.get("date")
-
-                    if last_commit_date:
-                        try:
-                            last_commit = datetime.fromisoformat(
-                                last_commit_date.replace("Z", "+00:00")
-                            )
-                            days_since_commit = (
-                                datetime.now(timezone.utc) - last_commit
-                            ).days
-                            # Clamp at source - future dates should not produce negative days
-                            if days_since_commit < 0:
-                                logger.warning(
-                                    f"Future commit date detected for {owner}/{repo}, "
-                                    f"clamping days_since_commit to 0"
-                                )
-                                days_since_commit = 0
-                            days_since_commit = max(0, days_since_commit)
-                        except ValueError as e:
-                            logger.warning(f"Could not parse commit date: {e}")
-
+        if repo_data is None:
             return {
+                "error": "repository_not_found",
                 "owner": owner,
                 "repo": repo,
-                "stars": repo_data.get("stargazers_count", 0),
-                "forks": repo_data.get("forks_count", 0),
-                "open_issues": repo_data.get("open_issues_count", 0),
-                "watchers": repo_data.get("watchers_count", 0),
-                "updated_at": repo_data.get("updated_at"),
-                "pushed_at": repo_data.get("pushed_at"),
-                "created_at": repo_data.get("created_at"),
-                "days_since_last_commit": days_since_commit,
-                "commits_90d": len(commits) if isinstance(commits, list) else 0,
-                "active_contributors_90d": unique_committers_90d,
-                "total_contributors": len(contributors) if isinstance(contributors, list) else 0,
-                # True bus factor: minimum contributors for 50% of commits
-                "true_bus_factor": true_bus_factor,
-                "bus_factor_confidence": bus_factor_confidence,
-                "contribution_distribution": contribution_distribution,
-                "archived": repo_data.get("archived", False),
-                "disabled": repo_data.get("disabled", False),
-                "default_branch": repo_data.get("default_branch", "main"),
-                "language": repo_data.get("language"),
-                "topics": repo_data.get("topics", []),
-                "source": "github",
             }
+
+        # 2. Recent commits (1 call - last 90 days)
+        since = (datetime.now(timezone.utc) - timedelta(days=90)).isoformat()
+        commits_url = f"{GITHUB_API}/repos/{owner}/{repo}/commits"
+        commits = await self._request_with_retry(
+            client,
+            commits_url,
+            params={"since": since, "per_page": 100},
+        )
+        commits = commits or []
+
+        # 3. Contributors (1 call)
+        contributors_url = f"{GITHUB_API}/repos/{owner}/{repo}/contributors"
+        contributors = await self._request_with_retry(
+            client,
+            contributors_url,
+            params={"per_page": 100},
+        )
+        contributors = contributors or []
+
+        # Calculate derived metrics
+        unique_committers_90d = 0
+        true_bus_factor = 1
+        bus_factor_confidence = "LOW"
+        contribution_distribution = []
+
+        if isinstance(commits, list):
+            # Count commits per author (not just unique authors)
+            committers: dict[str, int] = {}
+            for c in commits:
+                if isinstance(c, dict):
+                    author = c.get("author")
+                    if author and isinstance(author, dict):
+                        login = author.get("login")
+                        if login:
+                            committers[login] = committers.get(login, 0) + 1
+
+            unique_committers_90d = len(committers)
+
+            # Calculate true bus factor: minimum contributors for 50% of commits
+            if committers:
+                total_commits = sum(committers.values())
+                sorted_counts = sorted(committers.values(), reverse=True)
+
+                cumulative = 0
+                true_bus_factor = 0
+                for count in sorted_counts:
+                    cumulative += count
+                    true_bus_factor += 1
+                    if cumulative >= total_commits * 0.5:
+                        break
+
+                # Ensure at least 1
+                true_bus_factor = max(1, true_bus_factor)
+
+                # Confidence based on sample size
+                if total_commits >= 100:
+                    bus_factor_confidence = "HIGH"
+                elif total_commits >= 30:
+                    bus_factor_confidence = "MEDIUM"
+                else:
+                    bus_factor_confidence = "LOW"
+
+                # Top 10 contributors for distribution insight
+                sorted_contributors = sorted(
+                    committers.items(), key=lambda x: -x[1]
+                )[:10]
+                contribution_distribution = [
+                    {"login": login, "commits": count}
+                    for login, count in sorted_contributors
+                ]
+
+        # Days since last commit
+        days_since_commit = 999
+        if commits and isinstance(commits, list) and len(commits) > 0:
+            first_commit = commits[0]
+            if isinstance(first_commit, dict):
+                commit_info = first_commit.get("commit", {})
+                author_info = commit_info.get("author", {})
+                last_commit_date = author_info.get("date")
+
+                if last_commit_date:
+                    try:
+                        last_commit = datetime.fromisoformat(
+                            last_commit_date.replace("Z", "+00:00")
+                        )
+                        days_since_commit = (
+                            datetime.now(timezone.utc) - last_commit
+                        ).days
+                        # Clamp at source - future dates should not produce negative days
+                        if days_since_commit < 0:
+                            logger.warning(
+                                f"Future commit date detected for {owner}/{repo}, "
+                                f"clamping days_since_commit to 0"
+                            )
+                            days_since_commit = 0
+                        days_since_commit = max(0, days_since_commit)
+                    except ValueError as e:
+                        logger.warning(f"Could not parse commit date: {e}")
+
+        return {
+            "owner": owner,
+            "repo": repo,
+            "stars": repo_data.get("stargazers_count", 0),
+            "forks": repo_data.get("forks_count", 0),
+            "open_issues": repo_data.get("open_issues_count", 0),
+            "watchers": repo_data.get("watchers_count", 0),
+            "updated_at": repo_data.get("updated_at"),
+            "pushed_at": repo_data.get("pushed_at"),
+            "created_at": repo_data.get("created_at"),
+            "days_since_commit": days_since_commit,
+            "commits_90d": len(commits) if isinstance(commits, list) else 0,
+            "active_contributors_90d": unique_committers_90d,
+            "total_contributors": len(contributors) if isinstance(contributors, list) else 0,
+            # True bus factor: minimum contributors for 50% of commits
+            "true_bus_factor": true_bus_factor,
+            "bus_factor_confidence": bus_factor_confidence,
+            "contribution_distribution": contribution_distribution,
+            "archived": repo_data.get("archived", False),
+            "disabled": repo_data.get("disabled", False),
+            "default_branch": repo_data.get("default_branch", "main"),
+            "language": repo_data.get("language"),
+            "topics": repo_data.get("topics", []),
+            "source": "github",
+        }
 
     async def get_repo_metrics_from_url(self, url: str) -> dict:
         """

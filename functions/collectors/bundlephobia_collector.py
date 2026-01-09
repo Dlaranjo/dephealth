@@ -23,6 +23,25 @@ logger.setLevel(logging.INFO)
 BUNDLEPHOBIA_API = "https://bundlephobia.com/api/size"
 DEFAULT_TIMEOUT = 30.0
 
+# Module-level HTTP client for connection pooling
+_http_client: Optional[httpx.AsyncClient] = None
+
+
+def get_http_client() -> httpx.AsyncClient:
+    """Get or create shared HTTP client with connection pooling."""
+    global _http_client
+    if _http_client is None:
+        _http_client = httpx.AsyncClient(
+            timeout=45.0,
+            limits=httpx.Limits(
+                max_keepalive_connections=20,
+                max_connections=100,
+                keepalive_expiry=30.0,
+            ),
+            http2=True,  # Enable HTTP/2 multiplexing
+        )
+    return _http_client
+
 
 def encode_package_spec(name: str, version: Optional[str] = None) -> str:
     """
@@ -46,7 +65,9 @@ async def retry_with_backoff(
     base_delay: float = 1.0,
     **kwargs,
 ):
-    """Retry async function with exponential backoff."""
+    """Retry async function with exponential backoff and jitter."""
+    import random
+
     last_exception = None
 
     for attempt in range(max_retries):
@@ -58,8 +79,10 @@ async def retry_with_backoff(
                 logger.error(f"Failed after {max_retries} retries: {e}")
                 raise
 
-            delay = base_delay * (2**attempt)
-            logger.warning(f"Attempt {attempt + 1} failed, retrying in {delay}s: {e}")
+            base = base_delay * (2**attempt)
+            jitter = random.uniform(0, base * 0.3)  # 0-30% jitter
+            delay = base + jitter
+            logger.warning(f"Attempt {attempt + 1} failed, retrying in {delay:.2f}s: {e}")
             await asyncio.sleep(delay)
 
     raise last_exception
@@ -86,72 +109,73 @@ async def get_bundle_size(name: str, version: Optional[str] = None) -> dict:
         Returns empty dict with error field if fetch fails.
         Bundlephobia may not have data for all packages.
     """
-    async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT) as client:
-        # Build and encode package specifier (handles scoped packages)
-        encoded_spec = encode_package_spec(name, version)
+    client = get_http_client()
 
-        try:
-            url = f"{BUNDLEPHOBIA_API}?package={encoded_spec}"
-            resp = await retry_with_backoff(client.get, url)
-            resp.raise_for_status()
-            data = resp.json()
+    # Build and encode package specifier (handles scoped packages)
+    encoded_spec = encode_package_spec(name, version)
 
-            # Extract key metrics
-            return {
-                "name": data.get("name"),
-                "version": data.get("version"),
-                # Size metrics
-                "size": data.get("size", 0),  # Minified size in bytes
-                "gzip": data.get("gzip", 0),  # Gzipped size in bytes
-                # Dependency info
-                "dependency_count": data.get("dependencyCount", 0),
-                "has_side_effects": data.get("hasSideEffects", True),
-                # Download time estimates (milliseconds)
-                # Based on bundlephobia's network speed assumptions
-                "download_time_3g": _estimate_download_time(
-                    data.get("gzip", 0), network="3g"
-                ),
-                "download_time_4g": _estimate_download_time(
-                    data.get("gzip", 0), network="4g"
-                ),
-                # Size categories for quick filtering
-                "size_category": _categorize_size(data.get("gzip", 0)),
-                "source": "bundlephobia",
-            }
+    try:
+        url = f"{BUNDLEPHOBIA_API}?package={encoded_spec}"
+        resp = await retry_with_backoff(client.get, url)
+        resp.raise_for_status()
+        data = resp.json()
 
-        except httpx.HTTPStatusError as e:
-            if e.response.status_code == 404:
-                logger.debug(f"Bundle size not available for {name}")
-                return {
-                    "name": name,
-                    "error": "not_found",
-                    "source": "bundlephobia",
-                }
-            elif e.response.status_code == 429:
-                # Rate limited - back off
-                logger.warning(f"Bundlephobia rate limited for {name}")
-                return {
-                    "name": name,
-                    "error": "rate_limited",
-                    "source": "bundlephobia",
-                }
-            elif e.response.status_code == 504:
-                # Bundlephobia times out for very large/complex packages
-                logger.warning(f"Bundlephobia timeout for {name}")
-                return {
-                    "name": name,
-                    "error": "timeout",
-                    "source": "bundlephobia",
-                }
-            raise
+        # Extract key metrics
+        return {
+            "name": data.get("name"),
+            "version": data.get("version"),
+            # Size metrics
+            "size": data.get("size", 0),  # Minified size in bytes
+            "gzip": data.get("gzip", 0),  # Gzipped size in bytes
+            # Dependency info
+            "dependency_count": data.get("dependencyCount", 0),
+            "has_side_effects": data.get("hasSideEffects", True),
+            # Download time estimates (milliseconds)
+            # Based on bundlephobia's network speed assumptions
+            "download_time_3g": _estimate_download_time(
+                data.get("gzip", 0), network="3g"
+            ),
+            "download_time_4g": _estimate_download_time(
+                data.get("gzip", 0), network="4g"
+            ),
+            # Size categories for quick filtering
+            "size_category": _categorize_size(data.get("gzip", 0)),
+            "source": "bundlephobia",
+        }
 
-        except Exception as e:
-            logger.error(f"Failed to fetch bundle size for {name}: {e}")
+    except httpx.HTTPStatusError as e:
+        if e.response.status_code == 404:
+            logger.debug(f"Bundle size not available for {name}")
             return {
                 "name": name,
-                "error": str(e),
+                "error": "not_found",
                 "source": "bundlephobia",
             }
+        elif e.response.status_code == 429:
+            # Rate limited - back off
+            logger.warning(f"Bundlephobia rate limited for {name}")
+            return {
+                "name": name,
+                "error": "rate_limited",
+                "source": "bundlephobia",
+            }
+        elif e.response.status_code == 504:
+            # Bundlephobia times out for very large/complex packages
+            logger.warning(f"Bundlephobia timeout for {name}")
+            return {
+                "name": name,
+                "error": "timeout",
+                "source": "bundlephobia",
+            }
+        raise
+
+    except Exception as e:
+        logger.error(f"Failed to fetch bundle size for {name}: {e}")
+        return {
+            "name": name,
+            "error": str(e),
+            "source": "bundlephobia",
+        }
 
 
 def _estimate_download_time(gzip_bytes: int, network: str = "4g") -> int:
