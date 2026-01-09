@@ -10,7 +10,7 @@ Processes messages from the dead-letter queue, implementing:
 import json
 import logging
 import os
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 
 import boto3
 
@@ -23,7 +23,6 @@ dynamodb = boto3.resource("dynamodb")
 DLQ_URL = os.environ.get("DLQ_URL")
 MAIN_QUEUE_URL = os.environ.get("MAIN_QUEUE_URL")
 PACKAGES_TABLE = os.environ.get("PACKAGES_TABLE", "dephealth-packages")
-API_KEYS_TABLE = os.environ.get("API_KEYS_TABLE", "dephealth-api-keys")
 MAX_DLQ_RETRIES = int(os.environ.get("MAX_DLQ_RETRIES", "5"))
 
 
@@ -155,29 +154,24 @@ def _delete_dlq_message(message: dict) -> None:
 
 
 def _store_permanent_failure(body: dict, message_id: str, last_error: str) -> None:
-    """Store permanently failed message for manual review with 90-day TTL."""
-    table = dynamodb.Table(API_KEYS_TABLE)
+    """Store permanently failed message for manual review."""
+    table = dynamodb.Table(PACKAGES_TABLE)
 
     # Extract package info for easier identification
     ecosystem = body.get("ecosystem", "unknown")
     name = body.get("name", "unknown")
 
-    now = datetime.now(timezone.utc)
-    ttl_90_days = int((now + timedelta(days=90)).timestamp())
-
     try:
         table.put_item(
             Item={
-                "pk": f"FAILED#{name}",
-                "sk": now.isoformat(),
+                "pk": f"FAILED#{message_id}",
+                "sk": datetime.now(timezone.utc).isoformat(),
                 "ecosystem": ecosystem,
                 "name": name,
-                "message_id": message_id,
-                "last_error": last_error,
+                "body": body,
+                "failure_reason": last_error,
                 "retry_count": body.get("_retry_count", 0),
-                "original_message": json.dumps(body),
-                "failed_at": now.isoformat(),
-                "ttl": ttl_90_days,  # Auto-cleanup after 90 days
+                "failed_at": datetime.now(timezone.utc).isoformat(),
             }
         )
         logger.info(f"Stored permanent failure for {ecosystem}/{name}")
