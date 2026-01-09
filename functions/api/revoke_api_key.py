@@ -18,6 +18,7 @@ logger.setLevel(logging.INFO)
 
 # Import session verification
 from api.auth_callback import verify_session_token
+from shared.response_utils import error_response
 
 dynamodb = boto3.resource("dynamodb")
 dynamodb_client = boto3.client("dynamodb")
@@ -42,12 +43,12 @@ def handler(event, context):
             session_token = cookies["session"].value
 
     if not session_token:
-        return _error_response(401, "unauthorized", "Not authenticated")
+        return error_response(401, "unauthorized", "Not authenticated")
 
     # Verify session token
     session_data = verify_session_token(session_token)
     if not session_data:
-        return _error_response(401, "session_expired", "Session expired. Please log in again.")
+        return error_response(401, "session_expired", "Session expired. Please log in again.")
 
     user_id = session_data.get("user_id")
 
@@ -56,7 +57,7 @@ def handler(event, context):
     key_id = path_params.get("key_id")
 
     if not key_id:
-        return _error_response(400, "missing_key_id", "API key ID is required")
+        return error_response(400, "missing_key_id", "API key ID is required")
 
     # Get all API keys for user to find matching one
     table = dynamodb.Table(API_KEYS_TABLE)
@@ -77,7 +78,7 @@ def handler(event, context):
                 break
 
         if not target_key:
-            return _error_response(404, "key_not_found", "API key not found")
+            return error_response(404, "key_not_found", "API key not found")
 
         # Initialize USER_META if it doesn't exist (for users created before this feature)
         try:
@@ -168,7 +169,7 @@ def handler(event, context):
 
     except Exception as e:
         logger.error(f"Error revoking API key: {e}")
-        return _error_response(500, "internal_error", "Failed to revoke API key")
+        return error_response(500, "internal_error", "Failed to revoke API key")
 
     return {
         "statusCode": 200,
@@ -177,10 +178,3 @@ def handler(event, context):
     }
 
 
-def _error_response(status_code: int, code: str, message: str) -> dict:
-    """Generate error response."""
-    return {
-        "statusCode": status_code,
-        "headers": {"Content-Type": "application/json"},
-        "body": json.dumps({"error": {"code": code, "message": message}}),
-    }
