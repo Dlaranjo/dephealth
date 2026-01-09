@@ -119,14 +119,17 @@ class TestScoringExtremeValues:
         assert not math.isnan(score)
 
     def test_very_large_contributors(self):
-        """Very large contributor count should cap at 1.0."""
+        """Very large contributor count should be high but weighted with issue response."""
         from scoring.health_score import _community_health
 
+        # With no issue response data, neutral (0.5) is assumed
+        # Score = contributor_score * 0.6 + issue_response * 0.4
+        # = 1.0 * 0.6 + 0.5 * 0.4 = 0.8
         data = {"total_contributors": 100000}
         score = _community_health(data)
 
         assert score <= 1.0
-        assert score >= 0.9  # Should be near max
+        assert score >= 0.7  # Should be high but not max without issue response data
 
     def test_zero_time_horizon_abandonment_risk(self):
         """Zero months time horizon should not cause division by zero."""

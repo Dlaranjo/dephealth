@@ -51,8 +51,16 @@ def calculate_health_score(data: dict) -> dict:
     health_score = round(max(0, min(100, raw_score * 100)), 1)
     confidence = _calculate_confidence(data)
 
+    # Add confidence interval to the score
+    margin = confidence.get("interval_margin", 10)
+    confidence_interval = [
+        max(0, health_score - margin),
+        min(100, health_score + margin)
+    ]
+
     return {
         "health_score": health_score,
+        "confidence_interval": confidence_interval,
         "risk_level": _get_risk_level(health_score),
         "components": {
             "maintainer_health": round(maintainer * 100, 1),
@@ -65,12 +73,61 @@ def calculate_health_score(data: dict) -> dict:
     }
 
 
+def _issue_response_score(data: dict) -> float:
+    """
+    Calculate score based on average issue response time.
+
+    Fast response (< 24h) = 1.0
+    Moderate response (24-72h) = 0.7-1.0 (linear decay)
+    Slow response (> 72h) = exponential decay
+    No data = 0.5 (neutral)
+
+    NOTE: Response times are currently estimated using heuristics:
+    - Closed issues with comments: assumed 24h average response
+    - Open issues with comments: assumed 48h average response
+    This is a simplification to avoid additional GitHub API calls.
+    Future enhancement: fetch actual response times from GitHub Timeline API.
+    """
+    avg_response_hours = data.get("avg_issue_response_hours")
+    if avg_response_hours is None:
+        return 0.5  # Neutral if no data
+
+    if avg_response_hours <= 24:
+        return 1.0
+    elif avg_response_hours <= 72:
+        return 0.7 + 0.3 * (1 - (avg_response_hours - 24) / 48)
+    else:
+        # Exponential decay after 72 hours
+        return 0.7 * math.exp(-0.01 * (avg_response_hours - 72))
+
+
+def _pr_velocity_score(data: dict) -> float:
+    """
+    Calculate score based on PR merge velocity.
+
+    Looks at: merged_prs / opened_prs ratio over last 90 days
+    High velocity (> 0.8) = 1.0
+    Low velocity (< 0.3) = indicates problems
+    No data = 0.5 (neutral, could be stable package)
+    """
+    merged = data.get("prs_merged_90d", 0)
+    opened = data.get("prs_opened_90d", 0)
+
+    if opened == 0:
+        return 0.5  # No PRs is neutral (could be stable package)
+
+    velocity = merged / opened
+    # Sigmoid centered at 0.5 velocity
+    return 1 / (1 + math.exp(-5 * (velocity - 0.5)))
+
+
 def _maintainer_health(data: dict) -> float:
     """
     Maintainer activity signals.
 
     Uses smooth exponential decay for recency and sigmoid for bus factor.
     Bus factor uses true contribution distribution when available.
+    Now includes PR merge velocity to assess maintainer responsiveness.
     """
     # Recency score: exponential decay with 90-day half-life
     # Half-life means score = 0.5 after 90 days of inactivity
@@ -98,7 +155,10 @@ def _maintainer_health(data: dict) -> float:
             contributors = 1
         bus_factor_score = 1 / (1 + math.exp(-(contributors - 2)))
 
-    return recency * 0.6 + bus_factor_score * 0.4
+    # PR velocity score: measures maintainer responsiveness
+    pr_velocity = _pr_velocity_score(data)
+
+    return recency * 0.5 + bus_factor_score * 0.3 + pr_velocity * 0.2
 
 
 def _user_centric_health(data: dict) -> float:
@@ -201,7 +261,11 @@ def _evolution_health(data: dict) -> float:
 
     # Commit activity: log-scaled continuous function
     # log10(50) ~= 1.7, normalize so 50+ commits/90d = ~1.0
-    commits_90d = max(0, data.get("commits_90d", 0) or 0)  # Clamp negative
+    # Prefer bot-filtered commit count if available
+    commits_90d = max(
+        0,
+        data.get("commits_90d_non_bot", data.get("commits_90d", 0)) or 0
+    )  # Clamp negative
     activity_score = min(math.log10(commits_90d + 1) / 1.7, 1.0)
 
     # Apply maturity factor as floor for stable packages
@@ -217,14 +281,17 @@ def _community_health(data: dict) -> float:
     Community engagement signals.
 
     NOTE: OpenSSF and security signals moved to _security_health()
-    to avoid double-counting. Community is now 100% contributor diversity.
+    to avoid double-counting. Now includes contributor diversity and issue responsiveness.
     """
     # Contributors: log-scaled continuous
     # log10(50) ~= 1.7, normalize so 50+ contributors = ~1.0
     contributors = data.get("total_contributors", 1) or 1
     contributor_score = min(math.log10(contributors + 1) / 1.7, 1.0)
 
-    return contributor_score
+    # Issue response time: measures community engagement and maintainer interaction
+    issue_response = _issue_response_score(data)
+
+    return contributor_score * 0.6 + issue_response * 0.4
 
 
 def _security_health(data: dict) -> float:
@@ -286,16 +353,20 @@ def _security_health(data: dict) -> float:
 
 def _calculate_confidence(data: dict) -> dict:
     """
-    Calculate confidence in the score.
+    Calculate confidence in the score with intervals.
 
     Returns INSUFFICIENT_DATA for packages < 90 days old.
+    Includes confidence intervals based on data quality.
     """
-    # Data completeness check
+    # Data completeness check - expanded to include new signals
     required_fields = [
         "days_since_last_commit",
         "weekly_downloads",
         "active_contributors_90d",
         "last_published",
+        "avg_issue_response_hours",
+        "prs_merged_90d",
+        "prs_opened_90d",
     ]
     present = sum(
         1
@@ -374,9 +445,23 @@ def _calculate_confidence(data: dict) -> dict:
     else:
         level = "LOW"
 
+    # Determine data quality and confidence interval margin
+    # Based on data completeness ratio
+    if completeness >= 0.8:
+        data_quality = "high"
+        margin = 5
+    elif completeness >= 0.5:
+        data_quality = "medium"
+        margin = 10
+    else:
+        data_quality = "low"
+        margin = 15
+
     return {
         "score": round(confidence_score * 100, 1),
         "level": level,
+        "data_quality": data_quality,
+        "interval_margin": margin,
     }
 
 
