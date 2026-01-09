@@ -108,14 +108,11 @@ export class ApiStack extends cdk.Stack {
     packagesTable.grantReadData(getPackageHandler);
     apiKeysTable.grantReadWriteData(getPackageHandler);
 
-    // Provisioned concurrency for GetPackageHandler (most called endpoint)
-    // Eliminates cold starts for 95%+ of requests (~$35/month for 5 instances)
-    // Using currentVersion publishes a new version on each deploy (required for provisioned concurrency)
-    const getPackageAlias = new lambda.Alias(this, "GetPackageAlias", {
-      aliasName: "live",
-      version: getPackageHandler.currentVersion,
-      provisionedConcurrentExecutions: 5,
-    });
+    // Note: Provisioned concurrency removed due to AWS account concurrent execution limits.
+    // To re-enable when traffic justifies it:
+    // 1. Request quota increase: https://console.aws.amazon.com/servicequotas/
+    // 2. Uncomment the alias below with provisionedConcurrentExecutions
+    // 3. Update the API Gateway integration to use getPackageAlias instead of getPackageHandler
 
     // Scan packages handler
     const scanHandler = new lambda.Function(this, "ScanHandler", {
@@ -386,7 +383,7 @@ export class ApiStack extends cdk.Stack {
     const packageNameResource = ecosystemResource.addResource("{name}");
     packageNameResource.addMethod(
       "GET",
-      new apigateway.LambdaIntegration(getPackageAlias) // Use alias with provisioned concurrency
+      new apigateway.LambdaIntegration(getPackageHandler)
     );
 
     // POST /scan
