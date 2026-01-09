@@ -42,8 +42,10 @@
       id="mobile-menu-btn"
       class="md:hidden p-2 text-zinc-400 hover:text-white"
       aria-label="Toggle menu"
+      aria-expanded="false"
+      aria-controls="mobile-menu"
     >
-      <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+      <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
         <path
           id="menu-icon"
           stroke-linecap="round"
@@ -99,8 +101,20 @@
   const closeIcon = document.getElementById('close-icon');
 
   menuBtn?.addEventListener('click', () => {
+    const isHidden = mobileMenu?.classList.contains('hidden');
+
     mobileMenu?.classList.toggle('hidden');
     menuIcon?.classList.toggle('hidden');
     closeIcon?.classList.toggle('hidden');
+
+    // Update ARIA state
+    menuBtn?.setAttribute('aria-expanded', isHidden ? 'true' : 'false');
+
+    // Focus management
+    if (isHidden) {
+      // Menu is opening - focus first link
+      const firstLink = mobileMenu?.querySelector('a');
+      firstLink?.focus();
+    }
   });
 </script>

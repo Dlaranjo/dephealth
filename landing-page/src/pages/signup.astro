@@ -58,6 +58,7 @@ import Footer from '../components/Footer.astro';
 
 <script>
   const form = document.getElementById('signup-form');
+  const submitBtn = form?.querySelector('button[type="submit"]') as HTMLButtonElement;
   const btnText = document.getElementById('btn-text');
   const btnLoading = document.getElementById('btn-loading');
   const errorMsg = document.getElementById('error-message');
@@ -68,10 +69,12 @@ import Footer from '../components/Footer.astro';
 
     const email = (document.getElementById('email') as HTMLInputElement).value;
 
-    // Show loading state
+    // Disable button and show loading state
+    if (submitBtn) submitBtn.disabled = true;
     btnText?.classList.add('hidden');
     btnLoading?.classList.remove('hidden');
     errorMsg?.classList.add('hidden');
+    successMsg?.classList.add('hidden');
 
     try {
       const response = await fetch('https://api.dephealth.laranjo.dev/v1/signup', {
@@ -83,17 +86,19 @@ import Footer from '../components/Footer.astro';
       const data = await response.json();
 
       if (response.ok) {
-        successMsg.textContent = 'Check your email for a verification link!';
+        if (successMsg) successMsg.textContent = 'Check your email for a verification link!';
         successMsg?.classList.remove('hidden');
-        form.reset();
+        form?.reset();
       } else {
-        errorMsg.textContent = data.error?.message || 'Something went wrong';
+        if (errorMsg) errorMsg.textContent = data.error?.message || 'Something went wrong';
         errorMsg?.classList.remove('hidden');
       }
     } catch (error) {
-      errorMsg.textContent = 'Network error. Please try again.';
+      if (errorMsg) errorMsg.textContent = 'Network error. Please try again.';
       errorMsg?.classList.remove('hidden');
     } finally {
+      // Re-enable button and hide loading state
+      if (submitBtn) submitBtn.disabled = false;
       btnText?.classList.remove('hidden');
       btnLoading?.classList.add('hidden');
     }
