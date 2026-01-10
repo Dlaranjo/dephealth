@@ -7,7 +7,7 @@ import Footer from '../components/Footer.astro';
 <Layout title="Sign In | DepHealth">
   <Navbar />
 
-  <main class="max-w-md mx-auto px-4 py-24">
+  <main id="main-content" class="max-w-md mx-auto px-4 py-24">
     <div class="text-center mb-8">
       <h1 class="text-3xl font-bold text-white mb-4">Sign In to DepHealth</h1>
       <p class="text-zinc-400">
@@ -25,6 +25,7 @@ import Footer from '../components/Footer.astro';
           id="email"
           name="email"
           required
+          aria-describedby="error-message"
           class="w-full px-4 py-3 bg-[#0d0d10] border border-zinc-800 rounded-lg
                  text-white placeholder-zinc-500 focus:border-emerald-500
                  focus:ring-1 focus:ring-emerald-500 outline-none transition"
@@ -41,8 +42,8 @@ import Footer from '../components/Footer.astro';
         <span id="btn-loading" class="hidden">Sending...</span>
       </button>
 
-      <p id="error-message" class="text-red-400 text-sm hidden"></p>
-      <p id="success-message" class="text-emerald-400 text-sm hidden"></p>
+      <p id="error-message" class="text-red-400 text-sm hidden" role="alert" aria-live="polite"></p>
+      <p id="success-message" class="text-emerald-400 text-sm hidden" role="status" aria-live="polite"></p>
     </form>
 
     <div class="mt-8 text-center text-sm text-zinc-500">

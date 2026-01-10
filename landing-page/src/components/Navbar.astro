@@ -2,7 +2,7 @@
 
 ---
 
-<nav class="fixed top-0 left-0 right-0 z-50 bg-[#09090b]/80 backdrop-blur-lg border-b border-zinc-800/50">
+<nav aria-label="Main navigation" class="fixed top-0 left-0 right-0 z-50 bg-[#09090b]/80 backdrop-blur-lg border-b border-zinc-800/50">
   <div class="max-w-5xl mx-auto px-4 py-4 flex items-center justify-between">
     <!-- Logo -->
     <a href="/" class="flex items-center gap-2">
@@ -94,21 +94,36 @@
   const menuIcon = document.getElementById('menu-icon');
   const closeIcon = document.getElementById('close-icon');
 
+  function closeMenu() {
+    mobileMenu?.classList.add('hidden');
+    menuIcon?.classList.remove('hidden');
+    closeIcon?.classList.add('hidden');
+    menuBtn?.setAttribute('aria-expanded', 'false');
+    menuBtn?.focus();
+  }
+
+  function openMenu() {
+    mobileMenu?.classList.remove('hidden');
+    menuIcon?.classList.add('hidden');
+    closeIcon?.classList.remove('hidden');
+    menuBtn?.setAttribute('aria-expanded', 'true');
+    const firstLink = mobileMenu?.querySelector('a');
+    firstLink?.focus();
+  }
+
   menuBtn?.addEventListener('click', () => {
     const isHidden = mobileMenu?.classList.contains('hidden');
-
-    mobileMenu?.classList.toggle('hidden');
-    menuIcon?.classList.toggle('hidden');
-    closeIcon?.classList.toggle('hidden');
-
-    // Update ARIA state
-    menuBtn?.setAttribute('aria-expanded', isHidden ? 'true' : 'false');
-
-    // Focus management
     if (isHidden) {
-      // Menu is opening - focus first link
-      const firstLink = mobileMenu?.querySelector('a');
-      firstLink?.focus();
+      openMenu();
+    } else {
+      closeMenu();
+    }
+  });
+
+  // Close menu on Escape key
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && !mobileMenu?.classList.contains('hidden')) {
+      closeMenu();
     }
   });
 </script>

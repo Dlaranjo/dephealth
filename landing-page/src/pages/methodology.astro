@@ -3,6 +3,14 @@ import Layout from '../layouts/Layout.astro'
 import Navbar from '../components/Navbar.astro'
 import Footer from '../components/Footer.astro'
 
+const colorClasses: Record<string, string> = {
+  blue: 'bg-blue-500',
+  green: 'bg-green-500',
+  purple: 'bg-purple-500',
+  red: 'bg-red-500',
+  orange: 'bg-orange-500'
+}
+
 const components = [
   {
     name: 'User-Centric',
@@ -45,7 +53,7 @@ const components = [
 <Layout title="Scoring Methodology | DepHealth">
   <Navbar />
 
-  <main class="pt-24 pb-16">
+  <main id="main-content" class="pt-24 pb-16">
     <div class="max-w-4xl mx-auto px-4 sm:px-6">
       <!-- Header -->
       <div class="text-center mb-12">
@@ -70,7 +78,7 @@ const components = [
                 <span class="text-zinc-400">{c.weight}%</span>
               </div>
               <div class="w-full bg-zinc-700 rounded-full h-2 mb-3">
-                <div class={`bg-${c.color}-500 h-2 rounded-full`} style={`width: ${c.weight}%`}></div>
+                <div class={`${colorClasses[c.color]} h-2 rounded-full`} style={`width: ${c.weight}%`}></div>
               </div>
               <p class="text-sm text-zinc-400 mb-2">{c.description}</p>
               <div class="flex flex-wrap gap-2">

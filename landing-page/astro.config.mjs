@@ -5,6 +5,8 @@ import tailwindcss from '@tailwindcss/vite';
 
 // https://astro.build/config
 export default defineConfig({
+  site: 'https://dephealth.laranjo.dev',
+  compressHTML: true,
   vite: {
     plugins: [tailwindcss()]
   }

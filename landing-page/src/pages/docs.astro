@@ -168,7 +168,7 @@ const riskLevels = [
   <div class="max-w-5xl mx-auto px-4 sm:px-6">
     <Navbar />
 
-    <main class="py-12">
+    <main id="main-content" class="py-12">
       <h1 class="text-4xl font-bold mb-4">API Documentation</h1>
       <p class="text-xl text-zinc-400 mb-12">
         Everything you need to integrate DepHealth into your workflow.
@@ -254,7 +254,7 @@ curl -H "X-API-Key: YOUR_KEY" \
               <!-- Parameters -->
               {endpoint.params && (
                 <div class="p-6 border-b border-[#1a1a1f]">
-                  <h4 class="text-sm font-semibold text-zinc-400 mb-3">Parameters</h4>
+                  <h3 class="text-sm font-semibold text-zinc-400 mb-3">Parameters</h3>
                   <div class="space-y-2">
                     {endpoint.params.map((param) => (
                       <div class="flex items-start gap-3 text-sm">
@@ -270,7 +270,7 @@ curl -H "X-API-Key: YOUR_KEY" \
               <!-- Body -->
               {endpoint.body && (
                 <div class="p-6 border-b border-[#1a1a1f]">
-                  <h4 class="text-sm font-semibold text-zinc-400 mb-3">Request Body</h4>
+                  <h3 class="text-sm font-semibold text-zinc-400 mb-3">Request Body</h3>
                   <div class="bg-black/30 rounded-lg p-4 font-mono text-xs overflow-x-auto">
                     <pre class="text-zinc-300"><code>{endpoint.body}</code></pre>
                   </div>
@@ -279,7 +279,7 @@ curl -H "X-API-Key: YOUR_KEY" \
 
               <!-- Example -->
               <div class="p-6">
-                <h4 class="text-sm font-semibold text-zinc-400 mb-3">Example</h4>
+                <h3 class="text-sm font-semibold text-zinc-400 mb-3">Example</h3>
                 <div class="space-y-4">
                   <div>
                     <span class="text-xs text-zinc-500 mb-2 block">Request</span>
@@ -308,7 +308,7 @@ curl -H "X-API-Key: YOUR_KEY" \
         </h2>
 
         <div class="bg-[#111113] border border-[#1a1a1f] rounded-xl overflow-hidden">
-          <div class="grid grid-cols-4 gap-4 p-6">
+          <div class="grid grid-cols-2 md:grid-cols-4 gap-4 p-6">
             {riskLevels.map((risk) => (
               <div class="text-center">
                 <div class={`px-4 py-2 rounded-lg font-semibold mb-2 ${
@@ -338,9 +338,9 @@ curl -H "X-API-Key: YOUR_KEY" \
           <table class="w-full text-sm">
             <thead>
               <tr class="text-left text-zinc-400">
-                <th class="pb-4">Tier</th>
-                <th class="pb-4">Requests/Month</th>
-                <th class="pb-4">Price</th>
+                <th scope="col" class="pb-4">Tier</th>
+                <th scope="col" class="pb-4">Requests/Month</th>
+                <th scope="col" class="pb-4">Price</th>
               </tr>
             </thead>
             <tbody class="text-zinc-300">
@@ -400,9 +400,9 @@ curl -H "X-API-Key: YOUR_KEY" \
           <table class="w-full text-sm">
             <thead>
               <tr class="text-left text-zinc-400">
-                <th class="pb-4">Status</th>
-                <th class="pb-4">Code</th>
-                <th class="pb-4">Description</th>
+                <th scope="col" class="pb-4">Status</th>
+                <th scope="col" class="pb-4">Code</th>
+                <th scope="col" class="pb-4">Description</th>
               </tr>
             </thead>
             <tbody class="text-zinc-300">
@@ -423,6 +423,57 @@ curl -H "X-API-Key: YOUR_KEY" \
               </tr>
             </tbody>
           </table>
+        </div>
+      </section>
+
+      <!-- CLI Tool -->
+      <section id="cli-tool" class="mb-16">
+        <h2 class="text-2xl font-bold mb-6 flex items-center gap-2">
+          <span class="w-8 h-8 rounded-lg bg-blue-500/20 flex items-center justify-center text-blue-400">8</span>
+          CLI Tool
+        </h2>
+
+        <div class="bg-[#111113] border border-[#1a1a1f] rounded-xl p-6">
+          <p class="text-zinc-400 mb-4">Install the CLI to check packages from your terminal:</p>
+          <div class="bg-black/30 rounded-lg p-4 font-mono text-sm overflow-x-auto mb-4">
+            <pre class="text-zinc-300"><code>npm install -g @dephealth/cli
+
+# Check a single package
+dephealth check express
+
+# Scan your package.json
+dephealth scan</code></pre>
+          </div>
+          <p class="text-zinc-500 text-sm">
+            Configure your API key with <code class="bg-black/30 px-2 py-1 rounded">dephealth config --api-key YOUR_KEY</code>
+          </p>
+        </div>
+      </section>
+
+      <!-- GitHub Action -->
+      <section id="github-action" class="mb-16">
+        <h2 class="text-2xl font-bold mb-6 flex items-center gap-2">
+          <span class="w-8 h-8 rounded-lg bg-blue-500/20 flex items-center justify-center text-blue-400">9</span>
+          GitHub Action
+        </h2>
+
+        <div class="bg-[#111113] border border-[#1a1a1f] rounded-xl p-6">
+          <p class="text-zinc-400 mb-4">Add dependency health checks to your CI/CD pipeline:</p>
+          <div class="bg-black/30 rounded-lg p-4 font-mono text-sm overflow-x-auto">
+            <pre class="text-zinc-300"><code># .github/workflows/dephealth.yml
+name: Dependency Health Check
+on: [push, pull_request]
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Dlaranjo/dephealth@v1
+        with:
+          api-key: $&#123;&#123; secrets.DEPHEALTH_API_KEY &#125;&#125;
+          fail-on: HIGH</code></pre>
+          </div>
         </div>
       </section>
     </main>

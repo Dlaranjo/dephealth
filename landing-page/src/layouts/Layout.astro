@@ -11,7 +11,7 @@ interface Props {
 const {
   title,
   description = 'Predict which npm dependencies are at risk of abandonment. Get health scores and risk assessments for your packages.',
-  image = 'https://dephealth.laranjo.dev/og-image.png',
+  image = 'https://dephealth.laranjo.dev/og-image.svg',
   canonical = Astro.url.href,
 } = Astro.props
 ---
@@ -45,6 +45,16 @@ const {
 
     <!-- Robots -->
     <meta name="robots" content="index, follow" />
+
+    <!-- Content Security Policy -->
+    <meta http-equiv="Content-Security-Policy" content="
+      default-src 'self';
+      script-src 'self' https://plausible.io 'unsafe-inline';
+      style-src 'self' https://fonts.googleapis.com 'unsafe-inline';
+      font-src 'self' https://fonts.gstatic.com;
+      img-src 'self' data: https://dephealth.laranjo.dev;
+      connect-src 'self' https://api.dephealth.laranjo.dev https://plausible.io;
+    " />
 
     <!-- Favicon -->
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
