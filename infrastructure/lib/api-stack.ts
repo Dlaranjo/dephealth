@@ -420,6 +420,104 @@ export class ApiStack extends cdk.Stack {
     });
 
     // ===========================================
+    // Request Validators & Models (Security - validate POST bodies before Lambda)
+    // ===========================================
+
+    // Request validator for body validation
+    const bodyValidator = new apigateway.RequestValidator(this, "BodyValidator", {
+      restApi: this.api,
+      requestValidatorName: "validate-body",
+      validateRequestBody: true,
+      validateRequestParameters: false,
+    });
+
+    // Model for /scan endpoint
+    // Handler accepts either: {"content": "<package.json string>"} or {"dependencies": {...}}
+    // JSON Schema cannot express "at least one of" - handler validates this and returns clear error
+    const scanModel = new apigateway.Model(this, "ScanModel", {
+      restApi: this.api,
+      contentType: "application/json",
+      modelName: "ScanRequest",
+      schema: {
+        type: apigateway.JsonSchemaType.OBJECT,
+        properties: {
+          content: {
+            type: apigateway.JsonSchemaType.STRING,
+            description: "package.json content as string",
+          },
+          dependencies: {
+            type: apigateway.JsonSchemaType.OBJECT,
+            description: "Dependencies object from package.json",
+          },
+          devDependencies: {
+            type: apigateway.JsonSchemaType.OBJECT,
+            description: "Dev dependencies object from package.json",
+          },
+        },
+        additionalProperties: false,
+      },
+    });
+
+    // Model for /signup endpoint
+    const signupModel = new apigateway.Model(this, "SignupModel", {
+      restApi: this.api,
+      contentType: "application/json",
+      modelName: "SignupRequest",
+      schema: {
+        type: apigateway.JsonSchemaType.OBJECT,
+        required: ["email"],
+        properties: {
+          email: {
+            type: apigateway.JsonSchemaType.STRING,
+            format: "email",
+            minLength: 5,
+            maxLength: 254,
+          },
+        },
+        additionalProperties: false,
+      },
+    });
+
+    // Model for /auth/magic-link endpoint
+    const magicLinkModel = new apigateway.Model(this, "MagicLinkModel", {
+      restApi: this.api,
+      contentType: "application/json",
+      modelName: "MagicLinkRequest",
+      schema: {
+        type: apigateway.JsonSchemaType.OBJECT,
+        required: ["email"],
+        properties: {
+          email: {
+            type: apigateway.JsonSchemaType.STRING,
+            format: "email",
+            minLength: 5,
+            maxLength: 254,
+          },
+        },
+        additionalProperties: false,
+      },
+    });
+
+    // Model for /api-keys POST endpoint
+    // Note: name is optional - handler defaults to "Key {n}" if not provided
+    const createApiKeyModel = new apigateway.Model(this, "CreateApiKeyModel", {
+      restApi: this.api,
+      contentType: "application/json",
+      modelName: "CreateApiKeyRequest",
+      schema: {
+        type: apigateway.JsonSchemaType.OBJECT,
+        properties: {
+          name: {
+            type: apigateway.JsonSchemaType.STRING,
+            minLength: 1,
+            maxLength: 100,
+          },
+        },
+        additionalProperties: false,
+      },
+    });
+
+    // ===========================================
     // API Routes
     // ===========================================
 
@@ -452,11 +550,17 @@ export class ApiStack extends cdk.Stack {
       }
     );
 
-    // POST /scan
+    // POST /scan (with request validation)
     const scanResource = this.api.root.addResource("scan");
     scanResource.addMethod(
       "POST",
-      new apigateway.LambdaIntegration(scanHandler)
+      new apigateway.LambdaIntegration(scanHandler),
+      {
+        requestValidator: bodyValidator,
+        requestModels: {
+          "application/json": scanModel,
+        },
+      }
     );
 
     // GET /usage
@@ -478,11 +582,17 @@ export class ApiStack extends cdk.Stack {
     // Auth/Signup Routes
     // ===========================================
 
-    // POST /signup
+    // POST /signup (with request validation)
     const signupResource = this.api.root.addResource("signup");
     signupResource.addMethod(
       "POST",
-      new apigateway.LambdaIntegration(signupHandler)
+      new apigateway.LambdaIntegration(signupHandler),
+      {
+        requestValidator: bodyValidator,
+        requestModels: {
+          "application/json": signupModel,
+        },
+      }
     );
 
     // GET /verify?token=xxx
@@ -495,11 +605,17 @@ export class ApiStack extends cdk.Stack {
     // /auth routes
     const authResource = this.api.root.addResource("auth");
 
-    // POST /auth/magic-link
+    // POST /auth/magic-link (with request validation)
     const magicLinkResource = authResource.addResource("magic-link");
     magicLinkResource.addMethod(
       "POST",
-      new apigateway.LambdaIntegration(magicLinkHandler)
+      new apigateway.LambdaIntegration(magicLinkHandler),
+      {
+        requestValidator: bodyValidator,
+        requestModels: {
+          "application/json": magicLinkModel,
+        },
+      }
     );
 
     // GET /auth/callback?token=xxx
@@ -525,10 +641,16 @@ export class ApiStack extends cdk.Stack {
       new apigateway.LambdaIntegration(getApiKeysHandler)
     );
 
-    // POST /api-keys
+    // POST /api-keys (with request validation)
     apiKeysResource.addMethod(
       "POST",
-      new apigateway.LambdaIntegration(createApiKeyHandler)
+      new apigateway.LambdaIntegration(createApiKeyHandler),
+      {
+        requestValidator: bodyValidator,
+        requestModels: {
+          "application/json": createApiKeyModel,
+        },
+      }
     );
 
     // DELETE /api-keys/{key_id}

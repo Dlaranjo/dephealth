@@ -62,6 +62,11 @@ class InMemoryCircuitBreaker:
 
     Note: State is not shared across Lambda instances.
     Use DynamoDBCircuitBreaker for distributed coordination.
+
+    Thread Safety: All state-modifying operations use asyncio.Lock to prevent
+    race conditions when used with asyncio.gather() or concurrent coroutines.
+    Use the async methods (can_execute_async, record_success_async, record_failure_async)
+    for thread-safe operations in async contexts.
     """
 
     def __init__(self, name: str, config: Optional[CircuitBreakerConfig] = None):
@@ -69,9 +74,8 @@ class InMemoryCircuitBreaker:
         self.config = config or CircuitBreakerConfig()
         self._state = CircuitBreakerState()
 
-    @property
-    def state(self) -> CircuitState:
-        """Get current circuit state, checking for timeout."""
+    def _check_timeout_transition(self) -> CircuitState:
+        """Check for OPEN -> HALF_OPEN transition (internal, not thread-safe)."""
         if self._state.state == CircuitState.OPEN:
             if self._state.last_failure_time:
                 elapsed = time.time() - self._state.last_failure_time
@@ -82,8 +86,21 @@ class InMemoryCircuitBreaker:
                     self._state.success_count = 0
         return self._state.state
 
+    @property
+    def state(self) -> CircuitState:
+        """Get current circuit state, checking for timeout.
+
+        Note: This property is not thread-safe. For concurrent access,
+        use can_execute_async() which properly acquires the lock.
+        """
+        return self._check_timeout_transition()
+
     def can_execute(self) -> bool:
-        """Check if a request should be allowed."""
+        """Check if a request should be allowed.
+
+        WARNING: This method is NOT thread-safe for concurrent async operations.
+        Use can_execute_async() instead when using asyncio.gather() or similar.
+        """
         current_state = self.state
 
         if current_state == CircuitState.CLOSED:
@@ -99,8 +116,34 @@ class InMemoryCircuitBreaker:
 
         return False
 
+    async def can_execute_async(self) -> bool:
+        """Check if a request should be allowed (thread-safe for async).
+
+        Uses asyncio.Lock to prevent race conditions in half-open state
+        when multiple coroutines check simultaneously.
+        """
+        async with self._state.lock:
+            current_state = self._check_timeout_transition()
+
+            if current_state == CircuitState.CLOSED:
+                return True
+
+            if current_state == CircuitState.OPEN:
+                return False
+
+            # HALF_OPEN: Allow limited requests (atomic check-and-increment)
+            if self._state.half_open_calls < self.config.half_open_max_calls:
+                self._state.half_open_calls += 1
+                return True
+
+            return False
+
     def record_success(self) -> None:
-        """Record a successful request."""
+        """Record a successful request.
+
+        WARNING: This method is NOT thread-safe for concurrent async operations.
+        Use record_success_async() instead when using asyncio.gather() or similar.
+        """
         if self._state.state == CircuitState.HALF_OPEN:
             self._state.success_count += 1
             if self._state.success_count >= self.config.success_threshold:
@@ -111,8 +154,25 @@ class InMemoryCircuitBreaker:
             # Reset failure count on success
             self._state.failure_count = 0
 
+    async def record_success_async(self) -> None:
+        """Record a successful request (thread-safe for async)."""
+        async with self._state.lock:
+            if self._state.state == CircuitState.HALF_OPEN:
+                self._state.success_count += 1
+                if self._state.success_count >= self.config.success_threshold:
+                    logger.info(f"Circuit {self.name}: HALF_OPEN -> CLOSED (service recovered)")
+                    self._state.state = CircuitState.CLOSED
+                    self._state.failure_count = 0
+            elif self._state.state == CircuitState.CLOSED:
+                # Reset failure count on success
+                self._state.failure_count = 0
+
     def record_failure(self, error: Optional[Exception] = None) -> None:
-        """Record a failed request."""
+        """Record a failed request.
+
+        WARNING: This method is NOT thread-safe for concurrent async operations.
+        Use record_failure_async() instead when using asyncio.gather() or similar.
+        """
         self._state.failure_count += 1
         self._state.last_failure_time = time.time()
 
@@ -126,6 +186,23 @@ class InMemoryCircuitBreaker:
                     f"({self._state.failure_count} failures)"
                 )
                 self._state.state = CircuitState.OPEN
+
+    async def record_failure_async(self, error: Optional[Exception] = None) -> None:
+        """Record a failed request (thread-safe for async)."""
+        async with self._state.lock:
+            self._state.failure_count += 1
+            self._state.last_failure_time = time.time()
+
+            if self._state.state == CircuitState.HALF_OPEN:
+                logger.warning(f"Circuit {self.name}: HALF_OPEN -> OPEN (service still failing)")
+                self._state.state = CircuitState.OPEN
+            elif self._state.state == CircuitState.CLOSED:
+                if self._state.failure_count >= self.config.failure_threshold:
+                    logger.warning(
+                        f"Circuit {self.name}: CLOSED -> OPEN "
+                        f"({self._state.failure_count} failures)"
+                    )
+                    self._state.state = CircuitState.OPEN
 
 
 class CircuitOpenError(Exception):
@@ -141,6 +218,9 @@ def circuit_breaker(breaker: InMemoryCircuitBreaker):
     """
     Decorator to wrap function calls with circuit breaker.
 
+    Uses thread-safe async methods to prevent race conditions when
+    multiple decorated functions are called concurrently.
+
     Usage:
         github_circuit = InMemoryCircuitBreaker("github")
 
@@ -151,7 +231,8 @@ def circuit_breaker(breaker: InMemoryCircuitBreaker):
     def decorator(func: Callable[..., T]) -> Callable[..., T]:
         @wraps(func)
         async def wrapper(*args, **kwargs) -> T:
-            if not breaker.can_execute():
+            # Use thread-safe async method
+            if not await breaker.can_execute_async():
                 raise CircuitOpenError(
                     breaker.name,
                     breaker.config.timeout_seconds
@@ -159,10 +240,10 @@ def circuit_breaker(breaker: InMemoryCircuitBreaker):
 
             try:
                 result = await func(*args, **kwargs)
-                breaker.record_success()
+                await breaker.record_success_async()
                 return result
             except Exception as e:
-                breaker.record_failure(e)
+                await breaker.record_failure_async(e)
                 raise
 
         return wrapper

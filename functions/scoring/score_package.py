@@ -10,6 +10,7 @@ Can be triggered:
 import json
 import logging
 import os
+import threading
 import time
 import random
 from datetime import datetime, timezone
@@ -20,9 +21,17 @@ import boto3
 from boto3.dynamodb.conditions import Key
 from botocore.exceptions import ClientError
 
-from health_score import calculate_health_score
-from abandonment_risk import calculate_abandonment_risk
-from shared.logging_utils import configure_structured_logging, set_request_id
+# Support both Lambda (direct imports) and pytest (package-qualified imports)
+try:
+    # Lambda environment - all files deployed to same directory
+    from health_score import calculate_health_score
+    from abandonment_risk import calculate_abandonment_risk
+    from shared.logging_utils import configure_structured_logging, set_request_id
+except ImportError:
+    # pytest environment - functions dir added to sys.path
+    from scoring.health_score import calculate_health_score
+    from scoring.abandonment_risk import calculate_abandonment_risk
+    from shared.logging_utils import configure_structured_logging, set_request_id
 
 logger = logging.getLogger(__name__)
 
@@ -117,8 +126,22 @@ def from_decimal(obj):
         return [from_decimal(v) for v in obj]
     return obj
 
-dynamodb = boto3.resource("dynamodb")
+# Lazy initialization - avoid boto3 calls at import time
+# This prevents cold start failures if credentials are not yet available
+_dynamodb_resource = None
+_dynamodb_lock = threading.Lock()
 PACKAGES_TABLE = os.environ.get("PACKAGES_TABLE", "dephealth-packages")
+
+
+def _get_dynamodb():
+    """Get DynamoDB resource with thread-safe lazy initialization."""
+    global _dynamodb_resource
+    if _dynamodb_resource is None:
+        with _dynamodb_lock:
+            # Double-check pattern for thread safety
+            if _dynamodb_resource is None:
+                _dynamodb_resource = boto3.resource("dynamodb")
+    return _dynamodb_resource
 
 
 def handler(event, context):
@@ -163,7 +186,7 @@ def _score_single_package(event: dict) -> dict:
             "body": json.dumps({"error": "Package name is required"}),
         }
 
-    table = dynamodb.Table(PACKAGES_TABLE)
+    table = _get_dynamodb().Table(PACKAGES_TABLE)
 
     # Fetch package data with retry
     try:
@@ -322,7 +345,8 @@ def _process_stream_batch(event: dict) -> dict:
                 old_collected_at = old_image.get("collected_at", {}).get("S") if old_image else None
 
                 # Skip if collected_at hasn't changed (this is a score update, not collection)
-                if event_name == "MODIFY" and new_collected_at == old_collected_at:
+                # IMPORTANT: Must check new_collected_at is not None to avoid None == None being True
+                if event_name == "MODIFY" and new_collected_at and new_collected_at == old_collected_at:
                     logger.debug("Skipping - collected_at unchanged (likely score update)")
                     skipped += 1
                     continue
@@ -399,62 +423,22 @@ def _process_stream_batch(event: dict) -> dict:
 
 
 def _recalculate_all() -> dict:
-    """Recalculate scores for all packages."""
-    table = dynamodb.Table(PACKAGES_TABLE)
+    """
+    Recalculate scores for all packages.
 
-    recalculated = 0
-    errors = 0
+    WARNING: This function is disabled in production because it:
+    1. Will exceed Lambda's 15-minute timeout for large package counts
+    2. Loads all package keys into memory (OOM risk)
+    3. Provides no resume capability if interrupted
 
-    # Scan all packages - only need pk to extract ecosystem and name
-    response = table.scan(
-        FilterExpression="sk = :latest",
-        ExpressionAttributeValues={":latest": "LATEST"},
-        ProjectionExpression="pk",
-    )
-
-    packages = response.get("Items", [])
-
-    while "LastEvaluatedKey" in response:
-        response = table.scan(
-            FilterExpression="sk = :latest",
-            ExpressionAttributeValues={":latest": "LATEST"},
-            ProjectionExpression="pk",
-            ExclusiveStartKey=response["LastEvaluatedKey"],
-        )
-        packages.extend(response.get("Items", []))
-
-    logger.info(f"Recalculating scores for {len(packages)} packages")
-
-    for pkg in packages:
-        try:
-            # Extract ecosystem and name from pk (format: "ecosystem#name")
-            pk = pkg.get("pk", "")
-            if "#" not in pk:
-                logger.warning(f"Invalid pk format: {pk}")
-                errors += 1
-                continue
-
-            ecosystem, name = pk.split("#", 1)
-
-            result = _score_single_package({
-                "ecosystem": ecosystem,
-                "name": name,
-            })
-
-            if result["statusCode"] == 200:
-                recalculated += 1
-            else:
-                errors += 1
-
-        except Exception as e:
-            logger.error(f"Error recalculating {pkg.get('pk')}: {e}")
-            errors += 1
-
+    For batch recalculation, use a Step Functions workflow or
+    dispatch individual scoring messages to SQS.
+    """
+    logger.warning("_recalculate_all is disabled - use Step Functions for batch operations")
     return {
-        "statusCode": 200,
+        "statusCode": 501,
         "body": json.dumps({
-            "recalculated": recalculated,
-            "errors": errors,
-            "total": len(packages),
+            "error": "Batch recalculation is disabled",
+            "message": "This operation is not safe for production. Use Step Functions workflow for batch recalculation.",
         }),
     }

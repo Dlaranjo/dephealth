@@ -11,6 +11,7 @@ Rate limit: ~1000 requests/hour (undocumented but conservative)
 """
 
 import asyncio
+import json
 import logging
 from datetime import datetime, timezone
 from typing import Optional
@@ -54,20 +55,24 @@ async def retry_with_backoff(
     base_delay: float = 1.0,
     **kwargs,
 ):
-    """Retry async function with exponential backoff."""
+    """Retry async function with exponential backoff and jitter."""
+    import random
     last_exception = None
 
     for attempt in range(max_retries):
         try:
             return await func(*args, **kwargs)
-        except (httpx.HTTPStatusError, httpx.RequestError) as e:
+        except (httpx.HTTPStatusError, httpx.RequestError, httpx.TimeoutException) as e:
             last_exception = e
             if attempt == max_retries - 1:
                 logger.error(f"Failed after {max_retries} retries: {e}")
                 raise
 
+            # Add jitter to prevent thundering herd
             delay = base_delay * (2**attempt)
-            logger.warning(f"Attempt {attempt + 1} failed, retrying in {delay}s: {e}")
+            jitter = random.uniform(0, delay * 0.1)  # 10% jitter
+            delay += jitter
+            logger.warning(f"Attempt {attempt + 1} failed, retrying in {delay:.2f}s: {e}")
             await asyncio.sleep(delay)
 
     raise last_exception
@@ -102,7 +107,11 @@ async def get_npm_metadata(name: str) -> dict:
         try:
             resp = await retry_with_backoff(client.get, registry_url, headers=headers)
             resp.raise_for_status()
-            data = resp.json()
+            try:
+                data = resp.json()
+            except (ValueError, json.JSONDecodeError) as json_err:
+                logger.error(f"Invalid JSON response from npm registry for {name}: {json_err}")
+                return {"error": "invalid_json_response", "name": name}
         except httpx.HTTPStatusError as e:
             if e.response.status_code == 404:
                 logger.warning(f"Package not found: {name}")

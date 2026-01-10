@@ -58,6 +58,8 @@ export async function scanDependencies(
   const allPackages: PackageHealth[] = [];
   let notFound: string[] = [];
 
+  let failedBatches = 0;
+
   for (let i = 0; i < depEntries.length; i += BATCH_SIZE) {
     const batchNum = Math.floor(i / BATCH_SIZE) + 1;
     const totalBatches = Math.ceil(depEntries.length / BATCH_SIZE);
@@ -66,11 +68,23 @@ export async function scanDependencies(
     const batchEntries = depEntries.slice(i, Math.min(i + BATCH_SIZE, depEntries.length));
     const batchDeps = Object.fromEntries(batchEntries);
 
-    const batchResult = await client.scan(batchDeps);
-    allPackages.push(...batchResult.packages);
-    if (batchResult.not_found) {
-      notFound.push(...batchResult.not_found);
+    try {
+      const batchResult = await client.scan(batchDeps);
+      allPackages.push(...batchResult.packages);
+      if (batchResult.not_found) {
+        notFound.push(...batchResult.not_found);
+      }
+    } catch (error) {
+      failedBatches++;
+      const packageNames = batchEntries.map(([name]) => name);
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      core.warning(`Batch ${batchNum} failed: ${errorMessage}. Packages: ${packageNames.join(", ")}`);
+      // Continue with remaining batches instead of failing entirely
     }
+  }
+
+  if (failedBatches > 0) {
+    core.warning(`${failedBatches} batch(es) failed. Results may be incomplete.`);
   }
 
   // Aggregate results

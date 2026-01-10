@@ -61,6 +61,24 @@ describe("DepHealthClient", () => {
       ).not.toThrow();
     });
 
+    it("rejects SSRF attempt via localhost.attacker.com", () => {
+      expect(
+        () =>
+          new DepHealthClient("dh_test123", {
+            baseUrl: "http://localhost.attacker.com",
+          })
+      ).toThrow("baseUrl must use HTTPS for security");
+    });
+
+    it("rejects SSRF attempt via localhost@attacker.com", () => {
+      expect(
+        () =>
+          new DepHealthClient("dh_test123", {
+            baseUrl: "http://localhost@attacker.com",
+          })
+      ).toThrow("baseUrl must use HTTPS for security");
+    });
+
     it("allows HTTPS baseUrl", () => {
       expect(
         () =>

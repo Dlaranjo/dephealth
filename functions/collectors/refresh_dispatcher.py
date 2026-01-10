@@ -43,8 +43,21 @@ def handler(event, context):
         "reason": "daily_refresh"
     }
     """
+    # Validate required environment variables early
+    if not PACKAGE_QUEUE_URL:
+        logger.error("PACKAGE_QUEUE_URL environment variable not configured")
+        return {
+            "statusCode": 500,
+            "body": json.dumps({"error": "PACKAGE_QUEUE_URL not configured"}),
+        }
+
     tier = event.get("tier", 3)  # Default to all packages
     reason = event.get("reason", "manual")
+
+    # Validate tier is valid
+    if tier not in (1, 2, 3):
+        logger.warning(f"Invalid tier {tier}, defaulting to 3")
+        tier = 3
 
     logger.info(f"Starting refresh dispatch for tier {tier}, reason: {reason}")
 
@@ -111,7 +124,15 @@ def handler(event, context):
         entries = []
         for j, pk in enumerate(batch):
             # pk format is "ecosystem#name", e.g., "npm#lodash"
+            # Validate pk format before splitting
+            if "#" not in pk:
+                logger.warning(f"Malformed pk (missing #): {pk}, skipping")
+                continue
+
             ecosystem, name = pk.split("#", 1)
+            if not ecosystem or not name:
+                logger.warning(f"Malformed pk (empty ecosystem or name): {pk}, skipping")
+                continue
 
             # Add random jitter to spread load (tier-based)
             jitter_max = JITTER_MAX_SECONDS.get(tier, 60)

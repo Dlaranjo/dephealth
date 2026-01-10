@@ -155,8 +155,14 @@ export class DepHealthClient {
     // Validate baseUrl uses HTTPS (except localhost for development)
     const baseUrl = options.baseUrl ?? DEFAULT_API_BASE;
     if (baseUrl && !baseUrl.startsWith("https://")) {
-      const isLocalhost = baseUrl.startsWith("http://localhost") ||
-                          baseUrl.startsWith("http://127.0.0.1");
+      // Use URL parsing to prevent SSRF via hostnames like localhost.attacker.com
+      let isLocalhost = false;
+      try {
+        const parsed = new URL(baseUrl);
+        isLocalhost = parsed.hostname === "localhost" || parsed.hostname === "127.0.0.1";
+      } catch {
+        // Invalid URL - will fail HTTPS check
+      }
       if (!isLocalhost) {
         throw new Error("baseUrl must use HTTPS for security");
       }
@@ -268,8 +274,20 @@ export class DepHealthClient {
       }
 
       try {
-        return (await response.json()) as T;
-      } catch {
+        const data = await response.json();
+        // Basic validation to catch malformed responses early
+        if (data === null || data === undefined) {
+          throw new ApiClientError(
+            "Empty response from API",
+            response.status,
+            "server_error"
+          );
+        }
+        return data as T;
+      } catch (error) {
+        if (error instanceof ApiClientError) {
+          throw error;
+        }
         throw new ApiClientError(
           "Invalid JSON response from API",
           response.status,
@@ -303,8 +321,9 @@ export class DepHealthClient {
    * Get health score for a single package.
    */
   async getPackage(name: string, ecosystem = "npm"): Promise<PackageHealthFull> {
+    const encodedEcosystem = encodeURIComponent(ecosystem);
     const encodedName = encodeURIComponent(name);
-    return this.request<PackageHealthFull>(`/packages/${ecosystem}/${encodedName}`);
+    return this.request<PackageHealthFull>(`/packages/${encodedEcosystem}/${encodedName}`);
   }
 
   /**

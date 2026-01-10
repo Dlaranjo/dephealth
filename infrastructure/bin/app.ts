@@ -19,12 +19,22 @@ const storageStack = new StorageStack(app, "DepHealthStorage", {
 });
 
 // Pipeline stack (EventBridge + SQS + Lambda collectors)
+// IMPORTANT: Set ALERT_EMAIL env var to receive CloudWatch alarm notifications
+const alertEmail = process.env.ALERT_EMAIL?.trim() || undefined;
+if (!alertEmail) {
+  console.warn(
+    "WARNING: ALERT_EMAIL not set. CloudWatch alarms will not send notifications. " +
+    "Set ALERT_EMAIL=your@email.com to receive alerts."
+  );
+}
+
 const pipelineStack = new PipelineStack(app, "DepHealthPipeline", {
   env,
   description: "DepHealth data collection pipeline",
   packagesTable: storageStack.packagesTable,
   rawDataBucket: storageStack.rawDataBucket,
   apiKeysTable: storageStack.apiKeysTable, // For global GitHub rate limiting
+  alertEmail, // Email for SNS alert notifications
 });
 
 // API stack (API Gateway + Lambda handlers)

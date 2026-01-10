@@ -56,26 +56,30 @@ async def retry_with_backoff(
     **kwargs,
 ):
     """
-    Retry async function with exponential backoff.
+    Retry async function with exponential backoff and jitter.
 
     Args:
         func: Async function to retry
         max_retries: Maximum number of retry attempts
         base_delay: Base delay in seconds (doubles each retry)
     """
+    import random
     last_exception = None
 
     for attempt in range(max_retries):
         try:
             return await func(*args, **kwargs)
-        except (httpx.HTTPStatusError, httpx.RequestError) as e:
+        except (httpx.HTTPStatusError, httpx.RequestError, httpx.TimeoutException) as e:
             last_exception = e
             if attempt == max_retries - 1:
                 logger.error(f"Failed after {max_retries} retries: {e}")
                 raise
 
+            # Add jitter to prevent thundering herd
             delay = base_delay * (2**attempt)
-            logger.warning(f"Attempt {attempt + 1} failed, retrying in {delay}s: {e}")
+            jitter = random.uniform(0, delay * 0.1)  # 10% jitter
+            delay += jitter
+            logger.warning(f"Attempt {attempt + 1} failed, retrying in {delay:.2f}s: {e}")
             await asyncio.sleep(delay)
 
     raise last_exception

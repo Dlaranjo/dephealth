@@ -51,20 +51,24 @@ async def retry_with_backoff(
     base_delay: float = 1.0,
     **kwargs,
 ):
-    """Retry async function with exponential backoff."""
+    """Retry async function with exponential backoff and jitter."""
+    import random
     last_exception = None
 
     for attempt in range(max_retries):
         try:
             return await func(*args, **kwargs)
-        except (httpx.HTTPStatusError, httpx.RequestError) as e:
+        except (httpx.HTTPStatusError, httpx.RequestError, httpx.TimeoutException) as e:
             last_exception = e
             if attempt == max_retries - 1:
                 logger.error(f"Failed after {max_retries} retries: {e}")
                 raise
 
+            # Add jitter to prevent thundering herd
             delay = base_delay * (2**attempt)
-            logger.warning(f"Attempt {attempt + 1} failed, retrying in {delay}s: {e}")
+            jitter = random.uniform(0, delay * 0.1)  # 10% jitter
+            delay += jitter
+            logger.warning(f"Attempt {attempt + 1} failed, retrying in {delay:.2f}s: {e}")
             await asyncio.sleep(delay)
 
     raise last_exception
@@ -153,9 +157,11 @@ async def get_bundle_size(name: str, version: Optional[str] = None) -> dict:
 
         except Exception as e:
             logger.error(f"Failed to fetch bundle size for {name}: {e}")
+            # Use error code instead of raw exception string (security)
+            error_type = type(e).__name__
             return {
                 "name": name,
-                "error": str(e),
+                "error": f"fetch_error:{error_type}",
                 "source": "bundlephobia",
             }
 

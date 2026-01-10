@@ -203,7 +203,8 @@ def _process_dlq_message(message: dict) -> str:
     except (json.JSONDecodeError, KeyError) as e:
         logger.error(f"Invalid message body in DLQ message {message_id}: {e}")
         # Delete invalid messages - they can't be processed
-        _delete_dlq_message(message)
+        if not _delete_dlq_message(message):
+            logger.warning(f"Failed to delete invalid message {message_id} from DLQ")
         return "skipped"
 
     retry_count = int(body.get("_retry_count", 0))
@@ -228,8 +229,11 @@ def _process_dlq_message(message: dict) -> str:
                 f"last error: {last_error}"
             )
         _store_permanent_failure(body, message_id, last_error, error_type)
-        _delete_dlq_message(message)
-        emit_dlq_metric("permanent_failure", body.get("name"))
+        if _delete_dlq_message(message):
+            emit_dlq_metric("permanent_failure", body.get("name"))
+        else:
+            logger.warning(f"Failed to delete permanently failed message {message_id} from DLQ")
+            emit_dlq_metric("permanent_failure", body.get("name"))
         return "permanently_failed"
 
     # Requeue with incremented retry count and delay
@@ -248,26 +252,53 @@ def _process_dlq_message(message: dict) -> str:
             f"Requeued message {message_id} with delay {delay_seconds}s "
             f"(retry {retry_count + 1}/{MAX_DLQ_RETRIES}, error_type: {error_type})"
         )
-        emit_dlq_metric("requeued", body.get("name"))
     except Exception as e:
         logger.error(f"Failed to requeue message {message_id}: {e}")
         # Don't delete from DLQ if requeue failed - will be retried
         return "skipped"
 
     # Delete from DLQ after successful requeue
-    _delete_dlq_message(message)
-    return "requeued"
-
-
-def _delete_dlq_message(message: dict) -> None:
-    """Delete a message from the DLQ."""
-    try:
-        sqs.delete_message(
-            QueueUrl=DLQ_URL,
-            ReceiptHandle=message["ReceiptHandle"],
+    # If delete fails, the message will be reprocessed but the main queue
+    # has deduplication that will catch duplicates within DEDUP_WINDOW_MINUTES
+    if _delete_dlq_message(message):
+        emit_dlq_metric("requeued", body.get("name"))
+        return "requeued"
+    else:
+        # Delete failed - message may be reprocessed, but requeue succeeded
+        # so the work will be done. Log warning but report as requeued.
+        logger.warning(
+            f"Message {message_id} requeued but delete failed - may cause duplicate processing"
         )
-    except Exception as e:
-        logger.error(f"Failed to delete DLQ message: {e}")
+        emit_dlq_metric("requeued", body.get("name"))
+        return "requeued"
+
+
+def _delete_dlq_message(message: dict, max_retries: int = 3) -> bool:
+    """
+    Delete a message from the DLQ with retry logic.
+
+    Returns:
+        True if deletion succeeded, False otherwise.
+    """
+    import time
+
+    for attempt in range(max_retries):
+        try:
+            sqs.delete_message(
+                QueueUrl=DLQ_URL,
+                ReceiptHandle=message["ReceiptHandle"],
+            )
+            return True
+        except Exception as e:
+            if attempt == max_retries - 1:
+                logger.error(f"Failed to delete DLQ message after {max_retries} attempts: {e}")
+                return False
+            # Exponential backoff
+            delay = 0.5 * (2 ** attempt)
+            logger.warning(f"DLQ delete attempt {attempt + 1} failed, retrying in {delay}s: {e}")
+            time.sleep(delay)
+
+    return False
 
 
 def _store_permanent_failure(body: dict, message_id: str, last_error: str, error_type: str = "unknown") -> None:

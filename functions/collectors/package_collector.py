@@ -70,6 +70,36 @@ NPM_PACKAGE_PATTERN = re.compile(
 # Maximum package name length per npm
 MAX_PACKAGE_NAME_LENGTH = 214
 
+# Patterns to redact from error messages (security)
+_SENSITIVE_PATTERNS = [
+    (re.compile(r'arn:aws:[^:]*:[^:]*:\d{12}:[^\s]*', re.IGNORECASE), 'arn:aws:***:***:***:***'),
+    (re.compile(r'ghp_[a-zA-Z0-9]{36}', re.IGNORECASE), 'ghp_***'),
+    (re.compile(r'gho_[a-zA-Z0-9]{36}', re.IGNORECASE), 'gho_***'),
+    (re.compile(r'github_pat_[a-zA-Z0-9_]{22,}', re.IGNORECASE), 'github_pat_***'),
+    (re.compile(r'sk-[a-zA-Z0-9]{32,}', re.IGNORECASE), 'sk-***'),
+    (re.compile(r'Bearer\s+[a-zA-Z0-9._-]+', re.IGNORECASE), 'Bearer ***'),
+    (re.compile(r'\d{12}'), '***'),  # AWS account IDs
+]
+
+
+def _sanitize_error(error_str: str) -> str:
+    """
+    Sanitize error strings to remove sensitive information.
+
+    Redacts AWS ARNs, account IDs, API tokens, and other sensitive patterns
+    that might leak through exception messages.
+    """
+    result = error_str
+    for pattern, replacement in _SENSITIVE_PATTERNS:
+        result = pattern.sub(replacement, result)
+
+    # Truncate to prevent very long error strings
+    max_length = 500
+    if len(result) > max_length:
+        result = result[:max_length] + "...[truncated]"
+
+    return result
+
 
 def validate_message(body: dict) -> Tuple[bool, Optional[str]]:
     """
@@ -310,7 +340,7 @@ async def collect_package_data(ecosystem: str, name: str) -> dict:
 
     except Exception as e:
         logger.error(f"Failed to fetch deps.dev data for {ecosystem}/{name}: {e}")
-        combined_data["depsdev_error"] = str(e)
+        combined_data["depsdev_error"] = _sanitize_error(str(e))
 
         # Try to use stale data as fallback
         existing = await _get_existing_package_data(ecosystem, name)
@@ -363,7 +393,7 @@ async def collect_package_data(ecosystem: str, name: str) -> dict:
                 combined_data["npm_error"] = "circuit_open"
             elif isinstance(npm_result, Exception):
                 logger.error(f"Failed to fetch npm data for {name}: {npm_result}")
-                combined_data["npm_error"] = str(npm_result)
+                combined_data["npm_error"] = _sanitize_error(str(npm_result))
             else:
                 npm_data = npm_result
                 combined_data["npm"] = npm_data
@@ -394,7 +424,7 @@ async def collect_package_data(ecosystem: str, name: str) -> dict:
                 combined_data["bundlephobia_error"] = "circuit_open"
             elif isinstance(bundle_result, Exception):
                 logger.warning(f"Failed to fetch bundle size for {name}: {bundle_result}")
-                combined_data["bundlephobia_error"] = str(bundle_result)
+                combined_data["bundlephobia_error"] = _sanitize_error(str(bundle_result))
             elif "error" not in bundle_result:
                 combined_data["bundlephobia"] = bundle_result
                 combined_data["sources"].append("bundlephobia")
@@ -415,7 +445,8 @@ async def collect_package_data(ecosystem: str, name: str) -> dict:
             owner, repo = parsed
 
             # Check circuit breaker FIRST (before rate limiting check)
-            if not GITHUB_CIRCUIT.can_execute():
+            # Use async method to prevent race conditions
+            if not await GITHUB_CIRCUIT.can_execute_async():
                 logger.warning(f"GitHub circuit open, skipping for {ecosystem}/{name}")
                 combined_data["github_error"] = "circuit_open"
             else:
@@ -437,8 +468,8 @@ async def collect_package_data(ecosystem: str, name: str) -> dict:
                             )
 
                             if "error" not in github_data:
-                                # Record success for circuit breaker
-                                GITHUB_CIRCUIT.record_success()
+                                # Record success for circuit breaker (thread-safe)
+                                await GITHUB_CIRCUIT.record_success_async()
 
                                 combined_data["github"] = github_data
                                 combined_data["sources"].append("github")
@@ -475,15 +506,15 @@ async def collect_package_data(ecosystem: str, name: str) -> dict:
                                     "archived", False
                                 )
                             else:
-                                # Record failure for circuit breaker (API returned error)
-                                GITHUB_CIRCUIT.record_failure()
+                                # Record failure for circuit breaker (API returned error, thread-safe)
+                                await GITHUB_CIRCUIT.record_failure_async()
                                 combined_data["github_error"] = github_data["error"]
 
                 except Exception as e:
-                    # Record failure for circuit breaker
-                    GITHUB_CIRCUIT.record_failure(e)
+                    # Record failure for circuit breaker (thread-safe)
+                    await GITHUB_CIRCUIT.record_failure_async(e)
                     logger.error(f"Failed to fetch GitHub data for {owner}/{repo}: {e}")
-                    combined_data["github_error"] = str(e)
+                    combined_data["github_error"] = _sanitize_error(str(e))
 
     # Note: Bundlephobia is now fetched in parallel with npm data in section 2
 
