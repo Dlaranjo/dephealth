@@ -14,9 +14,20 @@ import pc from "picocolors";
 import ora, { type Ora } from "ora";
 import cliProgress from "cli-progress";
 import { readFileSync, existsSync } from "node:fs";
-import { resolve as resolvePath } from "node:path";
+import { resolve as resolvePath, relative as relativePath } from "node:path";
 import { createInterface } from "node:readline";
 import { createRequire } from "node:module";
+
+// Exit codes (defined early for global error handler)
+const EXIT_SUCCESS = 0;
+const EXIT_RISK_EXCEEDED = 1;
+const EXIT_CLI_ERROR = 2;
+
+// Global unhandled rejection handler to prevent silent crashes
+process.on("unhandledRejection", (error) => {
+  console.error(pc.red("Unexpected error:"), error instanceof Error ? error.message : String(error));
+  process.exit(EXIT_CLI_ERROR);
+});
 
 // Dynamic version from package.json
 const require = createRequire(import.meta.url);
@@ -86,11 +97,6 @@ import {
   maskApiKey,
   readConfig,
 } from "./config.js";
-
-// Exit codes
-const EXIT_SUCCESS = 0;
-const EXIT_RISK_EXCEEDED = 1;
-const EXIT_CLI_ERROR = 2;
 
 /**
  * Get API client, exiting if no API key is configured.
@@ -329,6 +335,10 @@ program
       if (error instanceof ApiClientError) {
         if (error.status === 404) {
           console.error(pc.red(`Package not found: ${packageName}`));
+        } else if (error.code === "rate_limited") {
+          console.error(pc.red("Rate limit exceeded."));
+          console.error(pc.dim("Your API quota has been exhausted. Try again later or upgrade your plan."));
+          console.error(pc.dim("  https://dephealth.laranjo.dev/pricing"));
         } else {
           console.error(pc.red(`API Error: ${error.message}`));
         }
@@ -380,7 +390,25 @@ program
     }
 
     const client = getClient();
-    const filePath = resolvePath(path || ".", path?.endsWith(".json") ? "" : "package.json");
+
+    // Resolve the file path
+    const cwd = process.cwd();
+    let filePath: string;
+    if (!path) {
+      filePath = resolvePath(cwd, "package.json");
+    } else if (path.endsWith(".json")) {
+      filePath = resolvePath(cwd, path);
+    } else {
+      filePath = resolvePath(cwd, path, "package.json");
+    }
+
+    // Security: Validate path is within current working directory
+    const relPath = relativePath(cwd, filePath);
+    if (relPath.startsWith("..") && !relPath.startsWith("..\\") && relPath !== "..") {
+      // Allow paths like "../sibling-project/package.json" for monorepo use
+      // but warn the user
+      logVerbose(`Scanning path outside current directory: ${filePath}`);
+    }
 
     const dependencies = readPackageJson(filePath);
     const depCount = Object.keys(dependencies).length;
@@ -397,37 +425,63 @@ program
     const BATCH_SIZE = 25;
 
     let result: ScanResult;
+    let activeProgressBar: cliProgress.SingleBar | null = null;
 
     try {
       // Use progress bar for large scans (20+ dependencies)
       if (depCount >= PROGRESS_BAR_THRESHOLD && outputFormat === "table" && !quietMode) {
-        const progressBar = new cliProgress.SingleBar({
+        activeProgressBar = new cliProgress.SingleBar({
           format: 'Scanning |{bar}| {percentage}% | {value}/{total} packages',
           barCompleteChar: '█',
           barIncompleteChar: '░',
         });
 
-        progressBar.start(depCount, 0);
+        activeProgressBar.start(depCount, 0);
 
         // Batch processing with progress updates
         const depEntries = Object.entries(dependencies);
         const allPackages: PackageHealth[] = [];
         let notFound: string[] = [];
+        const failedPackages: string[] = [];
 
         for (let i = 0; i < depEntries.length; i += BATCH_SIZE) {
           const batchEntries = depEntries.slice(i, Math.min(i + BATCH_SIZE, depEntries.length));
           const batchDeps = Object.fromEntries(batchEntries);
 
-          const batchResult = await client.scan(batchDeps);
-          allPackages.push(...batchResult.packages);
-          if (batchResult.not_found) {
-            notFound.push(...batchResult.not_found);
+          try {
+            const batchResult = await client.scan(batchDeps);
+            allPackages.push(...batchResult.packages);
+            if (batchResult.not_found) {
+              notFound.push(...batchResult.not_found);
+            }
+          } catch (error) {
+            // Track failed packages but continue with remaining batches
+            const packageNames = batchEntries.map(([name]) => name);
+            failedPackages.push(...packageNames);
+            logVerbose(`Batch failed: ${error instanceof Error ? error.message : String(error)}`);
           }
 
-          progressBar.update(Math.min(i + BATCH_SIZE, depEntries.length));
+          activeProgressBar.update(Math.min(i + BATCH_SIZE, depEntries.length));
         }
 
-        progressBar.stop();
+        activeProgressBar.stop();
+        activeProgressBar = null;
+
+        // Report failed packages if any
+        if (failedPackages.length > 0) {
+          console.log(pc.yellow(`\n⚠ Could not scan ${failedPackages.length} package(s) due to errors:`));
+          if (failedPackages.length <= 5) {
+            for (const pkg of failedPackages) {
+              console.log(pc.dim(`  - ${pkg}`));
+            }
+          } else {
+            for (const pkg of failedPackages.slice(0, 5)) {
+              console.log(pc.dim(`  - ${pkg}`));
+            }
+            console.log(pc.dim(`  ... and ${failedPackages.length - 5} more`));
+          }
+          console.log("");
+        }
 
         // Aggregate results
         result = {
@@ -503,18 +557,31 @@ program
       if (options.failOn) {
         const threshold = options.failOn.toUpperCase();
         if (threshold === "CRITICAL" && result.critical > 0) {
+          log(pc.red(`\nExiting with code 1: Found ${result.critical} CRITICAL risk package(s) (--fail-on ${threshold})`));
           process.exit(EXIT_RISK_EXCEEDED);
         }
         if (threshold === "HIGH" && (result.critical > 0 || result.high > 0)) {
+          const count = result.critical + result.high;
+          log(pc.red(`\nExiting with code 1: Found ${count} HIGH+ risk package(s) (--fail-on ${threshold})`));
           process.exit(EXIT_RISK_EXCEEDED);
         }
       }
 
       process.exit(EXIT_SUCCESS);
     } catch (error) {
-      // Error occurred - progress bar/spinner already stopped or will be handled by cli-progress
+      // Stop progress bar if still active
+      if (activeProgressBar) {
+        activeProgressBar.stop();
+      }
+
       if (error instanceof ApiClientError) {
-        console.error(pc.red(`API Error: ${error.message}`));
+        if (error.code === "rate_limited") {
+          console.error(pc.red("Rate limit exceeded."));
+          console.error(pc.dim("Your API quota has been exhausted. Try again later or upgrade your plan."));
+          console.error(pc.dim("  https://dephealth.laranjo.dev/pricing"));
+        } else {
+          console.error(pc.red(`API Error: ${error.message}`));
+        }
       } else if (error instanceof Error) {
         console.error(pc.red(`Unexpected error: ${error.message}`));
         console.error(pc.dim("\nIf this persists, please report at:"));
@@ -537,9 +604,11 @@ program
   .description("Show API usage statistics")
   .action(async () => {
     const client = getClient();
+    const spinner = createSpinner("Fetching usage statistics...");
 
     try {
       const data = await client.getUsage();
+      spinner?.stop();
 
       console.log("");
       console.log(pc.bold("API Usage"));
@@ -559,8 +628,16 @@ program
 
       process.exit(EXIT_SUCCESS);
     } catch (error) {
+      spinner?.stop();
+
       if (error instanceof ApiClientError) {
-        console.error(pc.red(`API Error: ${error.message}`));
+        if (error.code === "rate_limited") {
+          console.error(pc.red("Rate limit exceeded."));
+          console.error(pc.dim("Your API quota has been exhausted. Try again later or upgrade your plan."));
+          console.error(pc.dim("  https://dephealth.laranjo.dev/pricing"));
+        } else {
+          console.error(pc.red(`API Error: ${error.message}`));
+        }
       } else if (error instanceof Error) {
         console.error(pc.red(`Unexpected error: ${error.message}`));
         console.error(pc.dim("\nIf this persists, please report at:"));

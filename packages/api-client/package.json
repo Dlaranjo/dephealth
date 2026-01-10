@@ -18,6 +18,8 @@
   "scripts": {
     "build": "tsc",
     "clean": "rm -rf dist",
+    "test": "vitest run",
+    "test:watch": "vitest",
     "prepublishOnly": "npm run build"
   },
   "engines": {
@@ -25,7 +27,8 @@
   },
   "devDependencies": {
     "@types/node": "20.17.12",
-    "typescript": "5.7.3"
+    "typescript": "5.7.3",
+    "vitest": "^4.0.16"
   },
   "keywords": [
     "dephealth",

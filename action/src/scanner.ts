@@ -1,6 +1,9 @@
 import { readFileSync, existsSync } from "node:fs";
 import { resolve } from "node:path";
-import { DepHealthClient, ScanResult } from "./api";
+import * as core from "@actions/core";
+import { DepHealthClient, ScanResult, PackageHealth } from "./api";
+
+const BATCH_SIZE = 25;
 
 export async function scanDependencies(
   apiKey: string,
@@ -36,9 +39,48 @@ export async function scanDependencies(
   const depCount = Object.keys(dependencies).length;
 
   if (depCount === 0) {
+    core.info("No dependencies found in package.json");
     return { total: 0, critical: 0, high: 0, medium: 0, low: 0, packages: [] };
   }
 
+  core.info(`Found ${depCount} dependencies, analyzing health scores...`);
+
   const client = new DepHealthClient(apiKey);
-  return client.scan(dependencies);
+
+  // Batch processing for large dependency lists to avoid timeouts
+  if (depCount <= BATCH_SIZE) {
+    // Small enough to process in one request
+    return client.scan(dependencies);
+  }
+
+  // Process in batches
+  const depEntries = Object.entries(dependencies);
+  const allPackages: PackageHealth[] = [];
+  let notFound: string[] = [];
+
+  for (let i = 0; i < depEntries.length; i += BATCH_SIZE) {
+    const batchNum = Math.floor(i / BATCH_SIZE) + 1;
+    const totalBatches = Math.ceil(depEntries.length / BATCH_SIZE);
+    core.info(`Processing batch ${batchNum}/${totalBatches}...`);
+
+    const batchEntries = depEntries.slice(i, Math.min(i + BATCH_SIZE, depEntries.length));
+    const batchDeps = Object.fromEntries(batchEntries);
+
+    const batchResult = await client.scan(batchDeps);
+    allPackages.push(...batchResult.packages);
+    if (batchResult.not_found) {
+      notFound.push(...batchResult.not_found);
+    }
+  }
+
+  // Aggregate results
+  return {
+    total: allPackages.length,
+    critical: allPackages.filter((p: PackageHealth) => p.risk_level === "CRITICAL").length,
+    high: allPackages.filter((p: PackageHealth) => p.risk_level === "HIGH").length,
+    medium: allPackages.filter((p: PackageHealth) => p.risk_level === "MEDIUM").length,
+    low: allPackages.filter((p: PackageHealth) => p.risk_level === "LOW").length,
+    packages: allPackages,
+    not_found: notFound.length > 0 ? notFound : undefined,
+  };
 }

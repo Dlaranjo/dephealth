@@ -112,6 +112,7 @@ export interface ClientOptions {
 
 export type ErrorCode =
   | "unauthorized"
+  | "forbidden"
   | "rate_limited"
   | "not_found"
   | "invalid_request"
@@ -143,8 +144,26 @@ export class DepHealthClient {
   private maxRetries: number;
 
   constructor(apiKey: string, options: ClientOptions = {}) {
+    // Validate API key
+    if (!apiKey || apiKey.trim() === "") {
+      throw new Error("API key is required and cannot be empty");
+    }
+    if (!apiKey.startsWith("dh_")) {
+      throw new Error("Invalid API key format. Keys should start with 'dh_'");
+    }
+
+    // Validate baseUrl uses HTTPS (except localhost for development)
+    const baseUrl = options.baseUrl ?? DEFAULT_API_BASE;
+    if (baseUrl && !baseUrl.startsWith("https://")) {
+      const isLocalhost = baseUrl.startsWith("http://localhost") ||
+                          baseUrl.startsWith("http://127.0.0.1");
+      if (!isLocalhost) {
+        throw new Error("baseUrl must use HTTPS for security");
+      }
+    }
+
     this.apiKey = apiKey;
-    this.baseUrl = options.baseUrl ?? DEFAULT_API_BASE;
+    this.baseUrl = baseUrl;
     this.timeout = options.timeout ?? DEFAULT_TIMEOUT_MS;
     this.maxRetries = options.maxRetries ?? DEFAULT_MAX_RETRIES;
   }
@@ -154,6 +173,16 @@ export class DepHealthClient {
    */
   private sleep(ms: number): Promise<void> {
     return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
+  /**
+   * Calculate retry delay with exponential backoff and jitter.
+   * Jitter prevents thundering herd when many clients retry simultaneously.
+   */
+  private getRetryDelay(attempt: number): number {
+    const baseDelay = Math.pow(2, attempt) * 1000; // 1s, 2s, 4s
+    const jitter = Math.random() * 1000; // 0-1s random jitter
+    return baseDelay + jitter;
   }
 
   /**
@@ -204,8 +233,7 @@ export class DepHealthClient {
 
         // Retry on network errors
         if (attempt < this.maxRetries) {
-          const delay = Math.pow(2, attempt) * 1000; // 1s, 2s, 4s
-          await this.sleep(delay);
+          await this.sleep(this.getRetryDelay(attempt));
           continue;
         }
         throw lastError;
@@ -216,8 +244,7 @@ export class DepHealthClient {
       // Check for retryable status codes (5xx, 429)
       if (!response.ok && this.isRetryableStatus(response.status)) {
         if (attempt < this.maxRetries) {
-          const delay = Math.pow(2, attempt) * 1000; // 1s, 2s, 4s
-          await this.sleep(delay);
+          await this.sleep(this.getRetryDelay(attempt));
           continue;
         }
       }
@@ -240,7 +267,15 @@ export class DepHealthClient {
         throw new ApiClientError(message, response.status, code);
       }
 
-      return response.json() as Promise<T>;
+      try {
+        return (await response.json()) as T;
+      } catch {
+        throw new ApiClientError(
+          "Invalid JSON response from API",
+          response.status,
+          "server_error"
+        );
+      }
     }
 
     // Should not reach here, but TypeScript needs this
@@ -249,14 +284,16 @@ export class DepHealthClient {
 
   private mapStatusToCode(status: number): ErrorCode {
     switch (status) {
-      case 401:
-        return "unauthorized";
-      case 429:
-        return "rate_limited";
-      case 404:
-        return "not_found";
       case 400:
         return "invalid_request";
+      case 401:
+        return "unauthorized";
+      case 403:
+        return "forbidden";
+      case 404:
+        return "not_found";
+      case 429:
+        return "rate_limited";
       default:
         return status >= 500 ? "server_error" : "unknown_error";
     }
@@ -313,9 +350,19 @@ export function getRiskColor(level: RiskLevel | string): "red" | "yellow" | "gre
  * Format bytes to human-readable size.
  */
 export function formatBytes(bytes: number): string {
-  if (bytes === 0) return "0 B";
+  // Handle edge cases
+  if (!Number.isFinite(bytes) || Number.isNaN(bytes) || bytes < 0) {
+    return "0 B";
+  }
+  if (bytes === 0) {
+    return "0 B";
+  }
+
   const k = 1024;
-  const sizes = ["B", "KB", "MB"];
-  const i = Math.floor(Math.log(bytes) / Math.log(k));
+  const sizes = ["B", "KB", "MB", "GB", "TB"];
+  const i = Math.min(
+    Math.floor(Math.log(bytes) / Math.log(k)),
+    sizes.length - 1
+  );
   return `${parseFloat((bytes / Math.pow(k, i)).toFixed(1))} ${sizes[i]}`;
 }
