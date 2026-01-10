@@ -70,7 +70,7 @@ describe("DepHealthClient", () => {
     });
 
     it("throws ApiClientError on 429 rate limit", async () => {
-      mockFetch.mockResolvedValueOnce({
+      mockFetch.mockResolvedValue({
         ok: false,
         status: 429,
         statusText: "Too Many Requests",
@@ -78,10 +78,12 @@ describe("DepHealthClient", () => {
           Promise.resolve({ error: "rate_limit", message: "Rate limit exceeded" }),
       });
 
-      const client = new DepHealthClient("test-key");
+      // Use maxRetries: 0 to skip retry delays in test
+      const client = new DepHealthClient("test-key", { maxRetries: 0 });
 
       try {
         await client.scan({});
+        expect.fail("Should have thrown");
       } catch (error) {
         expect(error).toBeInstanceOf(ApiClientError);
         expect((error as ApiClientError).code).toBe("rate_limited");
@@ -89,9 +91,10 @@ describe("DepHealthClient", () => {
     });
 
     it("handles network errors", async () => {
-      mockFetch.mockRejectedValueOnce(new Error("Network failure"));
+      mockFetch.mockRejectedValue(new Error("Network failure"));
 
-      const client = new DepHealthClient("test-key");
+      // Use maxRetries: 0 to skip retry delays in test
+      const client = new DepHealthClient("test-key", { maxRetries: 0 });
 
       await expect(client.scan({})).rejects.toThrow("Network error");
     });

@@ -26,14 +26,14 @@
     "prepublishOnly": "npm run build"
   },
   "dependencies": {
-    "@dephealth/api-client": "*",
-    "@types/cli-progress": "^3.11.6",
+    "@dephealth/api-client": "1.0.0",
     "cli-progress": "^3.12.0",
     "commander": "^12.0.0",
     "ora": "^8.2.0",
     "picocolors": "^1.0.0"
   },
   "devDependencies": {
+    "@types/cli-progress": "^3.11.6",
     "@types/node": "^20.19.27",
     "typescript": "^5.0.0",
     "vitest": "^4.0.16"

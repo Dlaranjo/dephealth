@@ -76,10 +76,13 @@ async function run(): Promise<void> {
     // Add annotations for high-risk packages
     for (const pkg of result.packages) {
       if (pkg.risk_level === "CRITICAL" || pkg.risk_level === "HIGH") {
+        const safeName = sanitizeForAnnotation(pkg.package);
+        const riskFactor = pkg.abandonment_risk?.risk_factors?.[0];
+        const reason = riskFactor ? ` - ${sanitizeForAnnotation(riskFactor)}` : "";
         core.warning(
-          `${pkg.package}: ${pkg.risk_level} risk (health score: ${pkg.health_score}/100)`,
+          `${safeName}: ${pkg.risk_level} risk (score: ${pkg.health_score}/100)${reason}`,
           {
-            title: "Dependency Health Warning",
+            title: pkg.risk_level === "CRITICAL" ? "Critical Dependency Risk" : "High Dependency Risk",
             file: "package.json",
           }
         );
@@ -104,6 +107,15 @@ async function run(): Promise<void> {
   } catch (error) {
     handleError(error);
   }
+}
+
+/**
+ * Sanitize text for safe use in annotations (removes control characters and newlines).
+ */
+function sanitizeForAnnotation(text: string): string {
+  return text
+    .replace(/[\x00-\x1F\x7F]/g, "") // Remove control characters
+    .slice(0, 100); // Limit length
 }
 
 function handleError(error: unknown): void {
@@ -139,4 +151,8 @@ function handleError(error: unknown): void {
   }
 }
 
-run();
+run().catch((error) => {
+  // Catch any unhandled errors (e.g., bugs in handleError itself)
+  core.setFailed(`Unhandled error: ${error instanceof Error ? error.message : String(error)}`);
+  process.exit(1);
+});

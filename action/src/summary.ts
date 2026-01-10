@@ -12,6 +12,8 @@ export async function generateSummary(
 ): Promise<void> {
   const summary = core.summary;
 
+  const hasIssues = result.critical > 0 || result.high > 0;
+
   // Pass/fail banner
   if (failed) {
     summary.addRaw(
@@ -20,6 +22,16 @@ export async function generateSummary(
   } else if (threshold) {
     summary.addRaw(
       `> [!TIP]\n> **Scan Passed**: No packages exceed ${threshold} threshold\n\n`
+    );
+  } else if (hasIssues) {
+    // No threshold set, but there are issues to flag
+    summary.addRaw(
+      `> [!WARNING]\n> **Attention**: Found ${result.critical + result.high} packages with CRITICAL or HIGH risk\n\n`
+    );
+  } else {
+    // No threshold, no issues - healthy dependencies
+    summary.addRaw(
+      `> [!TIP]\n> **Healthy**: All dependencies have acceptable health scores\n\n`
     );
   }
 

@@ -91,7 +91,7 @@ describe("generateSummary", () => {
     expect(core.summary.addTable).toHaveBeenCalled();
   });
 
-  it("skips banner when no threshold set", async () => {
+  it("shows healthy banner when no threshold set and no issues", async () => {
     const result: ScanResult = {
       total: 1,
       critical: 0,
@@ -103,13 +103,32 @@ describe("generateSummary", () => {
 
     await generateSummary(result, false, "");
 
-    // Should not have CAUTION or TIP banners
-    const rawCalls = vi.mocked(core.summary.addRaw).mock.calls;
-    const bannerCalls = rawCalls.filter(
-      (call) =>
-        call[0].includes("[!CAUTION]") || call[0].includes("[!TIP]")
+    expect(core.summary.addRaw).toHaveBeenCalledWith(
+      expect.stringContaining("[!TIP]")
     );
-    expect(bannerCalls.length).toBe(0);
+    expect(core.summary.addRaw).toHaveBeenCalledWith(
+      expect.stringContaining("Healthy")
+    );
+  });
+
+  it("shows warning banner when no threshold set but has issues", async () => {
+    const result: ScanResult = {
+      total: 2,
+      critical: 1,
+      high: 0,
+      medium: 0,
+      low: 1,
+      packages: [],
+    };
+
+    await generateSummary(result, false, "");
+
+    expect(core.summary.addRaw).toHaveBeenCalledWith(
+      expect.stringContaining("[!WARNING]")
+    );
+    expect(core.summary.addRaw).toHaveBeenCalledWith(
+      expect.stringContaining("Attention")
+    );
   });
 
   it("generates collapsible section for all packages", async () => {
