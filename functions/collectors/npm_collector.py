@@ -13,6 +13,7 @@ Rate limit: ~1000 requests/hour (undocumented but conservative)
 import asyncio
 import json
 import logging
+import random
 from datetime import datetime, timezone
 from typing import Optional
 from urllib.parse import quote
@@ -23,6 +24,9 @@ import sys
 import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 from shared.circuit_breaker import circuit_breaker, NPM_CIRCUIT
+
+# HTTP status codes that are safe to retry
+RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504}
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -55,27 +59,34 @@ async def retry_with_backoff(
     base_delay: float = 1.0,
     **kwargs,
 ):
-    """Retry async function with exponential backoff and jitter."""
-    import random
+    """Retry async function with exponential backoff and equal jitter (50%)."""
     last_exception = None
 
     for attempt in range(max_retries):
         try:
             return await func(*args, **kwargs)
-        except (httpx.HTTPStatusError, httpx.RequestError, httpx.TimeoutException) as e:
-            last_exception = e
-            if attempt == max_retries - 1:
-                logger.error(f"Failed after {max_retries} retries: {e}")
+        except httpx.HTTPStatusError as e:
+            # Only retry on server errors and rate limits, not client errors
+            if e.response.status_code not in RETRYABLE_STATUS_CODES:
                 raise
+            last_exception = e
+        except httpx.RequestError as e:
+            # Network errors are always retryable
+            last_exception = e
 
-            # Add jitter to prevent thundering herd
-            delay = base_delay * (2**attempt)
-            jitter = random.uniform(0, delay * 0.1)  # 10% jitter
-            delay += jitter
-            logger.warning(f"Attempt {attempt + 1} failed, retrying in {delay:.2f}s: {e}")
+        if last_exception:
+            if attempt == max_retries - 1:
+                logger.error(f"Failed after {max_retries} attempts: {last_exception}")
+                raise last_exception
+
+            # Equal jitter: 50% fixed backoff + 50% random (better thundering herd prevention)
+            base = base_delay * (2 ** attempt)
+            delay = base * 0.5 + random.uniform(0, base * 0.5)
+            logger.warning(f"Attempt {attempt + 1} failed, retrying in {delay:.2f}s: {last_exception}")
             await asyncio.sleep(delay)
+            last_exception = None  # Reset for next attempt
 
-    raise last_exception
+    raise last_exception  # Should not reach here, but satisfies type checker
 
 
 @circuit_breaker(NPM_CIRCUIT)
