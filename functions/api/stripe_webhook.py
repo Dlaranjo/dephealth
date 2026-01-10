@@ -8,8 +8,10 @@ Uses Stripe signature verification instead of API key auth.
 import json
 import logging
 import os
+import time
 
 import boto3
+import stripe
 from boto3.dynamodb.conditions import Key
 from botocore.exceptions import ClientError
 from datetime import datetime, timezone
@@ -37,9 +39,20 @@ PRICE_TO_TIER = {
     (os.environ.get("STRIPE_PRICE_BUSINESS") or "price_business"): "business",
 }
 
+# Cached Stripe secrets with TTL
+_stripe_secrets_cache: tuple[str | None, str | None] = (None, None)
+_stripe_secrets_cache_time = 0.0
+STRIPE_SECRETS_CACHE_TTL = 300  # 5 minutes
 
-def get_stripe_secrets() -> tuple[str, str]:
-    """Retrieve Stripe API key and webhook secret from Secrets Manager."""
+
+def get_stripe_secrets() -> tuple[str | None, str | None]:
+    """Retrieve Stripe API key and webhook secret from Secrets Manager (cached with TTL)."""
+    global _stripe_secrets_cache, _stripe_secrets_cache_time
+
+    # Check if cache is still valid
+    if _stripe_secrets_cache[0] and (time.time() - _stripe_secrets_cache_time) < STRIPE_SECRETS_CACHE_TTL:
+        return _stripe_secrets_cache
+
     api_key = None
     webhook_secret = None
 
@@ -67,6 +80,8 @@ def get_stripe_secrets() -> tuple[str, str]:
         except ClientError as e:
             logger.error(f"Failed to retrieve Stripe webhook secret: {e}")
 
+    _stripe_secrets_cache = (api_key, webhook_secret)
+    _stripe_secrets_cache_time = time.time()
     return api_key, webhook_secret
 
 
@@ -80,14 +95,13 @@ def handler(event, context):
     - customer.subscription.deleted: Downgrade to free
     - invoice.payment_failed: Handle failed payments
     """
-    import stripe
-
     stripe_api_key, webhook_secret = get_stripe_secrets()
 
     if not stripe_api_key or not webhook_secret:
         logger.error("Stripe secrets not configured")
         return {
             "statusCode": 500,
+            "headers": {"Content-Type": "application/json"},
             "body": json.dumps({"error": "Stripe not configured"}),
         }
 
@@ -102,6 +116,7 @@ def handler(event, context):
         logger.warning("Missing Stripe signature")
         return {
             "statusCode": 400,
+            "headers": {"Content-Type": "application/json"},
             "body": json.dumps({"error": "Missing Stripe signature"}),
         }
 
@@ -110,16 +125,18 @@ def handler(event, context):
         stripe_event = stripe.Webhook.construct_event(
             payload, sig_header, webhook_secret
         )
-    except stripe.error.SignatureVerificationError as e:
+    except stripe.SignatureVerificationError as e:
         logger.warning(f"Invalid Stripe signature: {e}")
         return {
             "statusCode": 400,
+            "headers": {"Content-Type": "application/json"},
             "body": json.dumps({"error": "Invalid signature"}),
         }
     except Exception as e:
         logger.error(f"Webhook error: {e}")
         return {
             "statusCode": 400,
+            "headers": {"Content-Type": "application/json"},
             "body": json.dumps({"error": "Invalid webhook payload"}),
         }
 
@@ -145,17 +162,27 @@ def handler(event, context):
         else:
             logger.info(f"Unhandled event type: {event_type}")
 
+    except ClientError as e:
+        # DynamoDB errors are transient - return 500 so Stripe retries
+        logger.error(f"Transient error handling {event_type}: {e}")
+        return {
+            "statusCode": 500,
+            "headers": {"Content-Type": "application/json"},
+            "body": json.dumps({"error": "Temporary error, please retry"}),
+        }
     except Exception as e:
         logger.error(f"Error handling {event_type}: {e}")
-        # Return 200 anyway to prevent Stripe retries for handled errors
+        # Non-transient errors - return 200 to prevent Stripe retries
         # Don't expose internal error details in response
         return {
             "statusCode": 200,
+            "headers": {"Content-Type": "application/json"},
             "body": json.dumps({"received": True, "processed": False}),
         }
 
     return {
         "statusCode": 200,
+        "headers": {"Content-Type": "application/json"},
         "body": json.dumps({"received": True}),
     }
 

@@ -22,6 +22,11 @@ class TestStripeWebhookHandler:
         os.environ["STRIPE_SECRET_ARN"] = ""
         os.environ["STRIPE_WEBHOOK_SECRET_ARN"] = ""
 
+        import api.stripe_webhook as webhook_module
+        # Clear the secrets cache to ensure test isolation
+        webhook_module._stripe_secrets_cache = (None, None)
+        webhook_module._stripe_secrets_cache_time = 0.0
+
         from api.stripe_webhook import handler
 
         api_gateway_event["httpMethod"] = "POST"

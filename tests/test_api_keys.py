@@ -256,7 +256,8 @@ class TestRevokeApiKeyHandler:
 
         result = handler(api_gateway_event, {})
 
-        assert result["statusCode"] == 200
+        # 204 No Content is the correct status for successful DELETE
+        assert result["statusCode"] == 204
 
         # Verify key was deleted
         response = table.get_item(Key={"pk": "user_revoke123", "sk": key_hash1})

@@ -1040,7 +1040,8 @@ class TestApiKeyLifecycle:
         }
 
         result = revoke_handler(revoke_event, {})
-        assert result["statusCode"] == 200
+        # 204 No Content is the correct status for successful DELETE
+        assert result["statusCode"] == 204
 
         # Step 6: Verify revoked key no longer works
         assert validate_api_key(second_key) is None

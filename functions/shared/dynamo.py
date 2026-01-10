@@ -209,7 +209,7 @@ def batch_get_packages(ecosystem: str, names: list[str]) -> dict[str, dict]:
         return {}
 
     results = {}
-    batch_size = 100  # DynamoDB limit
+    batch_size = 25  # DynamoDB BatchGetItem limit (was incorrectly 100)
     max_retries = 5
 
     for i in range(0, len(names), batch_size):

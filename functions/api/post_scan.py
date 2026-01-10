@@ -20,7 +20,7 @@ logger.setLevel(logging.INFO)
 
 # Import from shared module (bundled with Lambda)
 from shared.auth import validate_api_key, check_and_increment_usage_batch
-from shared.response_utils import error_response, decimal_default
+from shared.response_utils import error_response, decimal_default, get_cors_headers
 
 
 def get_reset_timestamp() -> int:
@@ -86,21 +86,22 @@ def handler(event, context):
 
     Returns health scores for all dependencies.
     """
-    # Extract API key
+    # Extract API key and origin for CORS
     headers = event.get("headers", {})
     api_key = headers.get("x-api-key") or headers.get("X-API-Key")
+    origin = headers.get("origin") or headers.get("Origin")
 
     # Validate API key
     user = validate_api_key(api_key)
 
     if not user:
-        return error_response(401, "invalid_api_key", "Invalid or missing API key")
+        return error_response(401, "invalid_api_key", "Invalid or missing API key", origin=origin)
 
     # Parse request body
     try:
         body = json.loads(event.get("body", "{}"))
     except json.JSONDecodeError:
-        return error_response(400, "invalid_json", "Request body must be valid JSON")
+        return error_response(400, "invalid_json", "Request body must be valid JSON", origin=origin)
 
     # Extract dependencies
     dependencies = _extract_dependencies(body)
@@ -110,6 +111,7 @@ def handler(event, context):
             400,
             "no_dependencies",
             "No dependencies found. Provide 'content' (package.json string) or 'dependencies' object.",
+            origin=origin,
         )
 
     # Atomically check rate limit and reserve quota for this scan
@@ -126,6 +128,7 @@ def handler(event, context):
             429,
             "rate_limit_exceeded",
             f"Scanning {len(dependencies)} packages would exceed your remaining {remaining} requests.",
+            origin=origin,
         )
     remaining = user["monthly_limit"] - new_count
 
@@ -205,13 +208,14 @@ def handler(event, context):
     risk_order = {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "LOW": 3, None: 4}
     results.sort(key=lambda x: (risk_order.get(x["risk_level"], 4), x["package"]))
 
-    # Build response headers
+    # Build response headers with CORS
     response_headers = {
         "Content-Type": "application/json",
         "X-RateLimit-Limit": str(user["monthly_limit"]),
         "X-RateLimit-Remaining": str(remaining),  # Already reflects reserved quota
         "X-RateLimit-Reset": str(get_reset_timestamp()),
     }
+    response_headers.update(get_cors_headers(origin))
 
     # Check for usage alerts and add to response
     alert = check_usage_alerts(user, new_count)
