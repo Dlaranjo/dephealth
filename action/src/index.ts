@@ -12,8 +12,8 @@ async function run(): Promise<void> {
 
     const workingDirectory = core.getInput("working-directory") || ".";
     const failOn = core.getInput("fail-on")?.toUpperCase() || "";
-    const includeDev = core.getInput("include-dev") !== "false";
-    const softFail = core.getInput("soft-fail") === "true";
+    const includeDev = !["false", "no", "0"].includes(core.getInput("include-dev")?.toLowerCase() || "");
+    const softFail = ["true", "yes", "1"].includes(core.getInput("soft-fail")?.toLowerCase() || "");
 
     // Validate fail-on
     if (failOn && !["HIGH", "CRITICAL"].includes(failOn)) {
@@ -68,7 +68,15 @@ async function run(): Promise<void> {
     core.setOutput("has-issues", hasIssues);
     core.setOutput("highest-risk", highestRisk);
     core.setOutput("failed", failed);
+    core.setOutput("not-found-count", result.not_found?.length || 0);
     core.setOutput("results", JSON.stringify(result));
+
+    // Warn about packages that couldn't be found
+    if (result.not_found && result.not_found.length > 0) {
+      core.warning(
+        `${result.not_found.length} package(s) not found in registry: ${result.not_found.join(", ")}`
+      );
+    }
 
     // Generate job summary
     await generateSummary(result, failed, failOn);
@@ -126,6 +134,11 @@ function handleError(error: unknown): void {
           `Authentication failed (401)\n\nYour API key appears to be invalid or expired.\nVerify at https://dephealth.laranjo.dev/dashboard`
         );
         break;
+      case "forbidden":
+        core.setFailed(
+          `Access forbidden (403)\n\nYour account may have exceeded plan limits or been disabled.\nCheck https://dephealth.laranjo.dev/dashboard`
+        );
+        break;
       case "rate_limited":
         core.setFailed(
           `Rate limit exceeded (429)\n\nYour API quota has been exhausted.\nUpgrade at https://dephealth.laranjo.dev/pricing`
@@ -145,7 +158,18 @@ function handleError(error: unknown): void {
         core.setFailed(`API error: ${error.message}`);
     }
   } else if (error instanceof Error) {
-    core.setFailed(`Action failed: ${error.message}`);
+    // Handle specific error messages with better guidance
+    if (error.message.includes("Invalid API key format")) {
+      core.setFailed(
+        `Invalid API key format\n\nAPI keys should start with 'dh_'.\nGet your key at https://dephealth.laranjo.dev/dashboard`
+      );
+    } else if (error.message.includes("API key is required")) {
+      core.setFailed(
+        `API key is required\n\nPlease provide your API key via the 'api-key' input.\nGet your key at https://dephealth.laranjo.dev/dashboard`
+      );
+    } else {
+      core.setFailed(`Action failed: ${error.message}`);
+    }
   } else {
     core.setFailed("An unknown error occurred");
   }

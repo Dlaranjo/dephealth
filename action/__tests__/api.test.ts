@@ -31,7 +31,7 @@ describe("DepHealthClient", () => {
         json: () => Promise.resolve(mockResponse),
       });
 
-      const client = new DepHealthClient("test-api-key");
+      const client = new DepHealthClient("dh_test-api-key");
       const result = await client.scan({ lodash: "^4.17.21" });
 
       expect(mockFetch).toHaveBeenCalledWith(
@@ -39,7 +39,7 @@ describe("DepHealthClient", () => {
         expect.objectContaining({
           method: "POST",
           headers: expect.objectContaining({
-            "X-API-Key": "test-api-key",
+            "X-API-Key": "dh_test-api-key",
             "Content-Type": "application/json",
           }),
           body: JSON.stringify({ dependencies: { lodash: "^4.17.21" } }),
@@ -57,7 +57,7 @@ describe("DepHealthClient", () => {
           Promise.resolve({ error: "unauthorized", message: "Invalid API key" }),
       });
 
-      const client = new DepHealthClient("bad-key");
+      const client = new DepHealthClient("dh_bad-key");
 
       try {
         await client.scan({ lodash: "^4.17.21" });
@@ -79,7 +79,7 @@ describe("DepHealthClient", () => {
       });
 
       // Use maxRetries: 0 to skip retry delays in test
-      const client = new DepHealthClient("test-key", { maxRetries: 0 });
+      const client = new DepHealthClient("dh_test-key", { maxRetries: 0 });
 
       try {
         await client.scan({});
@@ -94,7 +94,7 @@ describe("DepHealthClient", () => {
       mockFetch.mockRejectedValue(new Error("Network failure"));
 
       // Use maxRetries: 0 to skip retry delays in test
-      const client = new DepHealthClient("test-key", { maxRetries: 0 });
+      const client = new DepHealthClient("dh_test-key", { maxRetries: 0 });
 
       await expect(client.scan({})).rejects.toThrow("Network error");
     });

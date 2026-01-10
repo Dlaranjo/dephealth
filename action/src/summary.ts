@@ -91,6 +91,14 @@ export async function generateSummary(
     summary.addRaw("\n\n</details>\n");
   }
 
+  // Not found packages warning
+  if (result.not_found && result.not_found.length > 0) {
+    summary.addRaw("\n> [!NOTE]\n");
+    summary.addRaw(`> **${result.not_found.length} package(s) not found**: `);
+    summary.addRaw(result.not_found.map((p) => `\`${escapeMarkdown(p)}\``).join(", "));
+    summary.addRaw("\n\n");
+  }
+
   // Footer
   summary.addRaw("\n---\n");
   summary.addRaw(`*[DepHealth](https://dephealth.laranjo.dev) v${VERSION}*\n`);
