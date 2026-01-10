@@ -306,7 +306,7 @@ class GitHubCollector:
                     c for c in commits
                     if isinstance(c, dict) and
                     not any(
-                        bot in c.get("author", {}).get("login", "").lower()
+                        bot in (c.get("author") or {}).get("login", "").lower()
                         for bot in BOT_PATTERNS
                     )
                 ]
