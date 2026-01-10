@@ -33,15 +33,11 @@ export class PipelineStack extends cdk.Stack {
     // ===========================================
     // Secrets Manager: GitHub Token
     // ===========================================
-    // Create a secret placeholder - actual value must be set manually
-    const githubTokenSecret = new secretsmanager.Secret(
+    // Reference existing secret (created manually before deployment)
+    const githubTokenSecret = secretsmanager.Secret.fromSecretNameV2(
       this,
       "GitHubTokenSecret",
-      {
-        secretName: "pkgwatch/github-token",
-        description: "GitHub Personal Access Token for API access",
-        removalPolicy: cdk.RemovalPolicy.RETAIN, // Protect secrets from accidental deletion
-      }
+      "pkgwatch/github-token"
     );
 
     // ===========================================

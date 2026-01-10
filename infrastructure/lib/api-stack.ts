@@ -52,20 +52,17 @@ export class ApiStack extends cdk.Stack {
     // ===========================================
     // Secrets Manager: Stripe Secrets
     // ===========================================
-    const stripeSecret = new secretsmanager.Secret(this, "StripeSecret", {
-      secretName: "pkgwatch/stripe-secret",
-      description: "Stripe API secret key",
-      removalPolicy: cdk.RemovalPolicy.RETAIN, // Protect secrets from accidental deletion
-    });
+    // Reference existing secrets (created manually before deployment)
+    const stripeSecret = secretsmanager.Secret.fromSecretNameV2(
+      this,
+      "StripeSecret",
+      "pkgwatch/stripe-secret"
+    );
 
-    const stripeWebhookSecret = new secretsmanager.Secret(
+    const stripeWebhookSecret = secretsmanager.Secret.fromSecretNameV2(
       this,
       "StripeWebhookSecret",
-      {
-        secretName: "pkgwatch/stripe-webhook",
-        description: "Stripe webhook signing secret",
-        removalPolicy: cdk.RemovalPolicy.RETAIN, // Protect secrets from accidental deletion
-      }
+      "pkgwatch/stripe-webhook"
     );
 
     // ===========================================
@@ -222,18 +219,12 @@ export class ApiStack extends cdk.Stack {
     // Auth/Signup Handlers
     // ===========================================
 
-    // Session secret for JWT tokens
-    const sessionSecret = new secretsmanager.Secret(this, "SessionSecret", {
-      secretName: "pkgwatch/session-secret",
-      description: "Secret key for signing session tokens",
-      generateSecretString: {
-        secretStringTemplate: "{}",
-        generateStringKey: "secret",
-        excludePunctuation: true,
-        passwordLength: 64,
-      },
-      removalPolicy: cdk.RemovalPolicy.RETAIN, // Protect secrets from accidental deletion
-    });
+    // Session secret for JWT tokens - reference existing secret
+    const sessionSecret = secretsmanager.Secret.fromSecretNameV2(
+      this,
+      "SessionSecret",
+      "pkgwatch/session-secret"
+    );
 
     // Common props for auth handlers
     const authLambdaProps = {
