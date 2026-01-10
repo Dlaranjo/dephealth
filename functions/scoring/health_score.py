@@ -29,13 +29,24 @@ def calculate_health_score(data: dict) -> dict:
 
     Returns:
         Dictionary with health score, risk level, components, and confidence
+
+    Raises:
+        TypeError: If data is not a dictionary
     """
-    # Calculate component scores
-    maintainer = _maintainer_health(data)
-    user_centric = _user_centric_health(data)
-    evolution = _evolution_health(data)
-    community = _community_health(data)
-    security = _security_health(data)
+    # Type validation - guard against None or non-dict inputs
+    if data is None:
+        logger.warning("calculate_health_score received None, using empty dict")
+        data = {}
+    elif not isinstance(data, dict):
+        raise TypeError(f"data must be a dict, got {type(data).__name__}")
+
+    # Calculate component scores with explicit clamping for defense-in-depth
+    # Each component should return 0-1, but we clamp to ensure bounds
+    maintainer = max(0.0, min(1.0, _maintainer_health(data)))
+    user_centric = max(0.0, min(1.0, _user_centric_health(data)))
+    evolution = max(0.0, min(1.0, _evolution_health(data)))
+    community = max(0.0, min(1.0, _community_health(data)))
+    security = max(0.0, min(1.0, _security_health(data)))
 
     # Weighted combination (v2 weights)
     # Security extracted from Community and given dedicated 15% weight
@@ -283,8 +294,8 @@ def _evolution_health(data: dict) -> float:
                 days_since_release = 0
             days_since_release = max(0, days_since_release)  # Defense in depth
             release_score = math.exp(-0.693 * days_since_release / 180)
-        except (ValueError, TypeError):
-            pass
+        except (ValueError, TypeError) as e:
+            logger.warning(f"Failed to parse last_published '{last_published}': {e}")
 
     # Commit activity: log-scaled continuous function
     # log10(50) ~= 1.7, normalize so 50+ commits/90d = ~1.0
@@ -453,8 +464,8 @@ def _calculate_confidence(data: dict) -> dict:
             else:
                 age_score = 1.0
 
-        except (ValueError, TypeError):
-            pass
+        except (ValueError, TypeError) as e:
+            logger.warning(f"Failed to parse created_at '{created}': {e}")
 
     # Data freshness penalty
     last_updated = data.get("last_updated")
@@ -479,8 +490,8 @@ def _calculate_confidence(data: dict) -> dict:
                 freshness_score = 0.7
             elif hours_since_update > 48:
                 freshness_score = 0.9
-        except (ValueError, TypeError):
-            pass
+        except (ValueError, TypeError) as e:
+            logger.warning(f"Failed to parse last_updated '{last_updated}': {e}")
 
     # Calculate overall confidence
     confidence_score = completeness * 0.5 + age_score * 0.3 + freshness_score * 0.2

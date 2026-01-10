@@ -9,6 +9,7 @@ import * as logs from "aws-cdk-lib/aws-logs";
 import * as s3 from "aws-cdk-lib/aws-s3";
 import * as secretsmanager from "aws-cdk-lib/aws-secretsmanager";
 import * as sns from "aws-cdk-lib/aws-sns";
+import * as snsSubscriptions from "aws-cdk-lib/aws-sns-subscriptions";
 import * as sqs from "aws-cdk-lib/aws-sqs";
 import * as lambdaEventSources from "aws-cdk-lib/aws-lambda-event-sources";
 import { Construct } from "constructs";
@@ -18,6 +19,7 @@ interface PipelineStackProps extends cdk.StackProps {
   packagesTable: dynamodb.Table;
   rawDataBucket: s3.Bucket;
   apiKeysTable: dynamodb.Table; // For global GitHub rate limiting with sharded counters
+  alertEmail?: string; // Email address for SNS alert notifications
 }
 
 export class PipelineStack extends cdk.Stack {
@@ -26,7 +28,7 @@ export class PipelineStack extends cdk.Stack {
   constructor(scope: Construct, id: string, props: PipelineStackProps) {
     super(scope, id, props);
 
-    const { packagesTable, rawDataBucket, apiKeysTable } = props;
+    const { packagesTable, rawDataBucket, apiKeysTable, alertEmail } = props;
 
     // ===========================================
     // Secrets Manager: GitHub Token
@@ -198,6 +200,7 @@ export class PipelineStack extends cdk.Stack {
         startingPosition: lambda.StartingPosition.LATEST,
         batchSize: 10,
         retryAttempts: 3,
+        reportBatchItemFailures: true, // Enable partial batch retries - only retry failed items
         onFailure: new lambdaEventSources.SqsDlq(streamsDlq),
       })
     );
@@ -314,6 +317,13 @@ export class PipelineStack extends cdk.Stack {
       displayName: "DepHealth Alerts",
     });
 
+    // CRITICAL: Subscribe email to alerts - without this, all alarms go nowhere
+    if (alertEmail) {
+      this.alertTopic.addSubscription(
+        new snsSubscriptions.EmailSubscription(alertEmail)
+      );
+    }
+
     // 1. DLQ Messages Alarm (Critical - indicates processing failures)
     const dlqAlarm = new cloudwatch.Alarm(this, "DlqAlarm", {
       alarmName: "dephealth-dlq-messages",
@@ -394,7 +404,7 @@ export class PipelineStack extends cdk.Stack {
     scoreErrorAlarm.addAlarmAction(new cloudwatchActions.SnsAction(this.alertTopic));
     scoreErrorAlarm.addOkAction(new cloudwatchActions.SnsAction(this.alertTopic));
 
-    // 5. DynamoDB Throttling Alarm
+    // 5. DynamoDB Throttling Alarm (packages table)
     const throttleAlarm = new cloudwatch.Alarm(this, "DynamoThrottleAlarm", {
       alarmName: "dephealth-dynamo-throttling",
       alarmDescription: "DynamoDB throttling detected - may need capacity increase",
@@ -414,6 +424,46 @@ export class PipelineStack extends cdk.Stack {
     });
     throttleAlarm.addAlarmAction(new cloudwatchActions.SnsAction(this.alertTopic));
     throttleAlarm.addOkAction(new cloudwatchActions.SnsAction(this.alertTopic));
+
+    // 6. API Keys Table Throttling Alarm (CRITICAL - auth failures go silent without this)
+    const apiKeysThrottleAlarm = new cloudwatch.Alarm(this, "ApiKeysThrottleAlarm", {
+      alarmName: "dephealth-apikeys-throttling",
+      alarmDescription: "API Keys table throttling - authentication requests may fail",
+      metric: apiKeysTable.metricThrottledRequestsForOperations({
+        operations: [
+          dynamodb.Operation.PUT_ITEM,
+          dynamodb.Operation.GET_ITEM,
+          dynamodb.Operation.QUERY,
+          dynamodb.Operation.UPDATE_ITEM,
+        ],
+        period: cdk.Duration.minutes(5),
+      }),
+      threshold: 5, // Lower threshold - auth failures are critical
+      evaluationPeriods: 1,
+      comparisonOperator:
+        cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+    });
+    apiKeysThrottleAlarm.addAlarmAction(new cloudwatchActions.SnsAction(this.alertTopic));
+    apiKeysThrottleAlarm.addOkAction(new cloudwatchActions.SnsAction(this.alertTopic));
+
+    // 7. Scheduled Job Execution Alarm (CRITICAL - detects when dispatcher stops running)
+    // If dispatcher hasn't been invoked in 24 hours, something is wrong with scheduling
+    // Note: Using 24h (86400s) which is the max standard CloudWatch period
+    const dispatcherNotRunningAlarm = new cloudwatch.Alarm(this, "DispatcherNotRunningAlarm", {
+      alarmName: "dephealth-dispatcher-not-running",
+      alarmDescription: "Refresh dispatcher has not run in 24 hours - data staleness risk",
+      metric: refreshDispatcher.metricInvocations({
+        period: cdk.Duration.hours(24), // Max standard CloudWatch period
+        statistic: "Sum",
+      }),
+      threshold: 1,
+      evaluationPeriods: 1,
+      comparisonOperator: cloudwatch.ComparisonOperator.LESS_THAN_THRESHOLD,
+      treatMissingData: cloudwatch.TreatMissingData.BREACHING, // No data = job didn't run
+    });
+    dispatcherNotRunningAlarm.addAlarmAction(new cloudwatchActions.SnsAction(this.alertTopic));
+    dispatcherNotRunningAlarm.addOkAction(new cloudwatchActions.SnsAction(this.alertTopic));
 
     // 6. Operations Dashboard
     new cloudwatch.Dashboard(this, "OperationsDashboard", {

@@ -6,6 +6,7 @@ Uses continuous risk factors with adjustable time horizons.
 
 import logging
 import math
+import re
 from typing import Optional
 
 logger = logging.getLogger(__name__)
@@ -61,7 +62,27 @@ def calculate_abandonment_risk(data: dict, months: int = 12) -> dict:
 
     Returns:
         Dictionary with probability, time horizon, and risk factors
+
+    Raises:
+        TypeError: If data is not a dictionary or months is not an integer
     """
+    # Type validation - guard against None or non-dict inputs
+    if data is None:
+        logger.warning("calculate_abandonment_risk received None, using empty dict")
+        data = {}
+    elif not isinstance(data, dict):
+        raise TypeError(f"data must be a dict, got {type(data).__name__}")
+
+    # Validate months parameter type
+    if not isinstance(months, int):
+        original_type = type(months).__name__  # Capture before conversion
+        try:
+            months = int(months)
+            logger.warning(f"months converted from {original_type} to int")
+        except (TypeError, ValueError):
+            logger.warning(f"Invalid months type {original_type}, using default 12")
+            months = 12
+
     # Clamp months to valid range (minimum 1 to prevent negative/zero probabilities)
     if months < 1:
         logger.warning(f"Invalid months value {months}, clamping to 1")
@@ -176,7 +197,12 @@ def calculate_abandonment_risk(data: dict, months: int = 12) -> dict:
 
     deprecation_msg = data.get("deprecation_message")
     if deprecation_msg:
-        factors.append(f"Deprecation note: {deprecation_msg[:100]}")
+        # Sanitize to prevent XSS - strip only HTML-dangerous characters
+        # Preserves useful chars like :, /, @, ' for package references and URLs
+        # This is user-controlled data from npm registry that could contain malicious content
+        sanitized = re.sub(r'[<>&"]', '', str(deprecation_msg)[:200])
+        if sanitized.strip():
+            factors.append(f"Deprecation note: {sanitized.strip()}")
 
     return {
         "probability": round(adjusted_risk * 100, 1),

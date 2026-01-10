@@ -53,6 +53,24 @@ class TestCalculateHealthScore:
         assert 0 <= result["health_score"] <= 100
         assert result["risk_level"] in ["LOW", "MEDIUM", "HIGH", "CRITICAL"]
 
+    def test_none_data_returns_valid_score(self):
+        """None data should be treated as empty dict and return valid score."""
+        result = calculate_health_score(None)
+
+        assert 0 <= result["health_score"] <= 100
+        assert result["risk_level"] in ["LOW", "MEDIUM", "HIGH", "CRITICAL"]
+
+    def test_non_dict_data_raises_type_error(self):
+        """Non-dict input should raise TypeError."""
+        with pytest.raises(TypeError, match="data must be a dict"):
+            calculate_health_score("not a dict")
+
+        with pytest.raises(TypeError, match="data must be a dict"):
+            calculate_health_score([1, 2, 3])
+
+        with pytest.raises(TypeError, match="data must be a dict"):
+            calculate_health_score(123)
+
     def test_score_components_sum_correctly(self, sample_healthy_package):
         """Component weights should add up correctly."""
         result = calculate_health_score(sample_healthy_package)
@@ -301,6 +319,32 @@ class TestCalculateAbandonmentRisk:
 
         # With Weibull survival analysis, risk is calculated more realistically
         assert result["probability"] < 50
+        assert result["time_horizon_months"] == 12
+
+    def test_none_data_returns_valid_result(self):
+        """None data should be treated as empty dict and return valid result."""
+        result = calculate_abandonment_risk(None)
+
+        assert result["probability"] >= 0
+        assert result["time_horizon_months"] == 12
+        assert "components" in result
+
+    def test_non_dict_data_raises_type_error(self):
+        """Non-dict input should raise TypeError."""
+        with pytest.raises(TypeError, match="data must be a dict"):
+            calculate_abandonment_risk("not a dict")
+
+        with pytest.raises(TypeError, match="data must be a dict"):
+            calculate_abandonment_risk([1, 2, 3])
+
+    def test_months_type_coercion(self):
+        """String months should be coerced to int."""
+        result = calculate_abandonment_risk({}, months="12")
+        assert result["time_horizon_months"] == 12
+
+    def test_invalid_months_uses_default(self):
+        """Invalid months type should use default 12."""
+        result = calculate_abandonment_risk({}, months="invalid")
         assert result["time_horizon_months"] == 12
 
     def test_abandoned_package_high_risk(self, sample_abandoned_package):
@@ -1395,46 +1439,199 @@ class TestRiskLevelConsistency:
 # Lambda Handler Tests
 # =============================================================================
 
-# NOTE: The Lambda handler tests are skipped because score_package.py uses
-# relative imports (from health_score import ...) that work in Lambda but
-# not in the pytest environment. The handler logic is simple wrapper code
-# around calculate_health_score() which is thoroughly tested above.
-#
-# To properly test the handler, you would need to either:
-# 1. Refactor score_package.py to use absolute imports
-# 2. Set up a more complex test environment that mimics Lambda's import behavior
-# 3. Use integration tests with LocalStack or similar
+# NOTE: These tests now work because score_package.py has been refactored to
+# support both Lambda (direct imports) and pytest (package-qualified imports).
 
 
-@pytest.mark.skip(reason="score_package.py uses relative imports incompatible with pytest")
 class TestScorePackageHandler:
-    """Tests for the score_package Lambda handler.
-
-    SKIPPED: These tests require refactoring score_package.py imports.
-    The handler uses 'from health_score import calculate_health_score'
-    which works in Lambda (where all files are in the same directory)
-    but fails in pytest (where we use 'from scoring.health_score import ...').
-    """
+    """Tests for the score_package Lambda handler."""
 
     def test_handler_requires_package_name(self, mock_dynamodb):
         """Handler should return 400 if package name missing."""
-        pass
+        import json
+        from scoring.score_package import handler
+
+        result = handler({"ecosystem": "npm"}, {})
+
+        assert result["statusCode"] == 400
+        body = json.loads(result["body"])
+        assert "error" in body
+        assert "name" in body["error"].lower() or "required" in body["error"].lower()
 
     def test_handler_returns_404_for_unknown_package(self, mock_dynamodb):
         """Handler should return 404 for non-existent package."""
-        pass
+        import json
+        from scoring.score_package import handler
+
+        result = handler({"ecosystem": "npm", "name": "nonexistent-package"}, {})
+
+        assert result["statusCode"] == 404
+        body = json.loads(result["body"])
+        assert "error" in body
 
     def test_handler_scores_and_updates_package(self, seeded_packages_table):
         """Handler should calculate and persist scores."""
-        pass
+        import json
+        from scoring.score_package import handler
 
-    def test_handler_processes_sqs_batch(self, seeded_packages_table):
-        """Handler should process SQS batch events."""
-        pass
+        result = handler({"ecosystem": "npm", "name": "lodash"}, {})
 
-    def test_handler_sqs_batch_handles_failures(self, seeded_packages_table):
-        """Handler should track failures in SQS batch."""
-        pass
+        assert result["statusCode"] == 200
+        body = json.loads(result["body"])
+
+        # Verify all expected response fields
+        assert "health_score" in body
+        assert 0 <= body["health_score"] <= 100
+        assert "risk_level" in body
+        assert body["risk_level"] in ["LOW", "MEDIUM", "HIGH", "CRITICAL"]
+        assert "components" in body
+        assert "confidence" in body
+        assert "abandonment_risk" in body
+        assert body["package"] == "lodash"
+        assert body["ecosystem"] == "npm"
+
+        # Verify data was persisted to DynamoDB
+        item = seeded_packages_table.get_item(
+            Key={"pk": "npm#lodash", "sk": "LATEST"}
+        ).get("Item")
+        assert item is not None
+        assert "scored_at" in item
+        assert "health_score" in item
+        assert "risk_level" in item
+
+    def test_handler_recalculate_all_disabled(self, mock_dynamodb):
+        """Handler should return 501 for recalculate_all action."""
+        import json
+        from scoring.score_package import handler
+
+        result = handler({"action": "recalculate_all"}, {})
+
+        assert result["statusCode"] == 501
+        body = json.loads(result["body"])
+        assert "error" in body
+        assert "disabled" in body["error"].lower()
+
+    def test_handler_stream_batch_processes_records(self, seeded_packages_table):
+        """Handler should process DynamoDB Stream batch events."""
+        import json
+        from scoring.score_package import handler
+
+        # Simulate a DynamoDB Stream event
+        event = {
+            "Records": [
+                {
+                    "eventName": "MODIFY",
+                    "dynamodb": {
+                        "NewImage": {
+                            "pk": {"S": "npm#lodash"},
+                            "sk": {"S": "LATEST"},
+                            "collected_at": {"S": "2024-01-02T00:00:00Z"},
+                        },
+                        "OldImage": {
+                            "pk": {"S": "npm#lodash"},
+                            "sk": {"S": "LATEST"},
+                            "collected_at": {"S": "2024-01-01T00:00:00Z"},
+                        },
+                    },
+                }
+            ]
+        }
+
+        result = handler(event, {})
+
+        assert result["statusCode"] == 200
+        body = json.loads(result["body"])
+        assert body["processed"] == 1
+        assert body["successes"] == 1
+        assert body["failures"] == 0
+        assert body["skipped"] == 0
+
+    def test_handler_stream_skips_remove_events(self, seeded_packages_table):
+        """Handler should skip REMOVE events in stream batch."""
+        import json
+        from scoring.score_package import handler
+
+        event = {
+            "Records": [
+                {
+                    "eventName": "REMOVE",
+                    "dynamodb": {
+                        "OldImage": {
+                            "pk": {"S": "npm#lodash"},
+                            "sk": {"S": "LATEST"},
+                        },
+                    },
+                }
+            ]
+        }
+
+        result = handler(event, {})
+
+        assert result["statusCode"] == 200
+        body = json.loads(result["body"])
+        assert body["skipped"] == 1
+        assert body["successes"] == 0
+
+    def test_handler_stream_handles_invalid_pk(self, mock_dynamodb):
+        """Handler should handle invalid pk format gracefully."""
+        import json
+        from scoring.score_package import handler
+
+        event = {
+            "Records": [
+                {
+                    "eventName": "MODIFY",
+                    "dynamodb": {
+                        "NewImage": {
+                            "pk": {"S": "invalid-no-hash"},  # Missing # separator
+                            "sk": {"S": "LATEST"},
+                            "collected_at": {"S": "2024-01-02T00:00:00Z"},
+                        },
+                        "OldImage": {
+                            "collected_at": {"S": "2024-01-01T00:00:00Z"},
+                        },
+                    },
+                }
+            ]
+        }
+
+        result = handler(event, {})
+
+        assert result["statusCode"] == 200
+        body = json.loads(result["body"])
+        assert body["failures"] == 1
+
+    def test_handler_stream_skips_unchanged_collected_at(self, seeded_packages_table):
+        """Handler should skip records where collected_at hasn't changed."""
+        import json
+        from scoring.score_package import handler
+
+        # Simulate a score update (collected_at unchanged)
+        event = {
+            "Records": [
+                {
+                    "eventName": "MODIFY",
+                    "dynamodb": {
+                        "NewImage": {
+                            "pk": {"S": "npm#lodash"},
+                            "sk": {"S": "LATEST"},
+                            "collected_at": {"S": "2024-01-01T00:00:00Z"},
+                        },
+                        "OldImage": {
+                            "pk": {"S": "npm#lodash"},
+                            "sk": {"S": "LATEST"},
+                            "collected_at": {"S": "2024-01-01T00:00:00Z"},
+                        },
+                    },
+                }
+            ]
+        }
+
+        result = handler(event, {})
+
+        assert result["statusCode"] == 200
+        body = json.loads(result["body"])
+        assert body["skipped"] >= 1
 
 
 # =============================================================================
