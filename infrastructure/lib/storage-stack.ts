@@ -45,9 +45,10 @@ export class StorageStack extends cdk.Stack {
       },
       encryption: dynamodb.TableEncryption.AWS_MANAGED, // Use AWS-managed CMK for encryption
       removalPolicy: cdk.RemovalPolicy.RETAIN,
-      // Enable streams for score calculation trigger
-      // Use NEW_AND_OLD_IMAGES for score calculation loop prevention
-      stream: dynamodb.StreamViewType.NEW_AND_OLD_IMAGES,
+      // Stream temporarily disabled - will be re-enabled in follow-up commit
+      // The stream was disabled during a CloudFormation rollback and needs to be
+      // removed from the template first before it can be re-added
+      // stream: dynamodb.StreamViewType.NEW_AND_OLD_IMAGES,
     });
 
     // GSI for querying packages by risk level

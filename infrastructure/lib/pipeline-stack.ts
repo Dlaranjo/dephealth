@@ -192,18 +192,18 @@ export class PipelineStack extends cdk.Stack {
       encryption: sqs.QueueEncryption.SQS_MANAGED, // Enable encryption at rest
     });
 
-    // Add DynamoDB Streams trigger to calculate scores after data collection
-    // Note: Loop prevention handled in Lambda code by checking if record has collected_at
-    // (score updates only set scored_at, not collected_at)
-    scoreCalculator.addEventSource(
-      new lambdaEventSources.DynamoEventSource(packagesTable, {
-        startingPosition: lambda.StartingPosition.LATEST,
-        batchSize: 10,
-        retryAttempts: 3,
-        reportBatchItemFailures: true, // Enable partial batch retries - only retry failed items
-        onFailure: new lambdaEventSources.SqsDlq(streamsDlq),
-      })
-    );
+    // DynamoDB Streams trigger temporarily disabled
+    // The stream was disabled during a CloudFormation rollback
+    // TODO: Re-enable once stream is restored on the packages table
+    // scoreCalculator.addEventSource(
+    //   new lambdaEventSources.DynamoEventSource(packagesTable, {
+    //     startingPosition: lambda.StartingPosition.LATEST,
+    //     batchSize: 10,
+    //     retryAttempts: 3,
+    //     reportBatchItemFailures: true,
+    //     onFailure: new lambdaEventSources.SqsDlq(streamsDlq),
+    //   })
+    // );
 
     // CloudWatch alarm for streams DLQ
     const streamsDlqAlarm = new cloudwatch.Alarm(this, "StreamsDlqAlarm", {
