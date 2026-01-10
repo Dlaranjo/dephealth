@@ -171,10 +171,11 @@ def handler(event, context):
         logger.error(f"Error revoking API key: {e}")
         return error_response(500, "internal_error", "Failed to revoke API key")
 
+    # 204 No Content is the correct status for successful DELETE
     return {
-        "statusCode": 200,
-        "headers": {"Content-Type": "application/json"},
-        "body": json.dumps({"message": "API key revoked successfully"}),
+        "statusCode": 204,
+        "headers": {},
+        "body": "",
     }
 
 

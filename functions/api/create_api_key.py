@@ -19,8 +19,9 @@ from botocore.exceptions import ClientError
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
-# Import session verification
+# Import session verification and shared utilities
 from api.auth_callback import verify_session_token
+from shared.response_utils import error_response
 
 dynamodb = boto3.resource("dynamodb")
 dynamodb_client = boto3.client("dynamodb")
@@ -54,12 +55,12 @@ def handler(event, context):
             session_token = cookies["session"].value
 
     if not session_token:
-        return _error_response(401, "unauthorized", "Not authenticated")
+        return error_response(401, "unauthorized", "Not authenticated")
 
     # Verify session token
     session_data = verify_session_token(session_token)
     if not session_data:
-        return _error_response(401, "session_expired", "Session expired. Please log in again.")
+        return error_response(401, "session_expired", "Session expired. Please log in again.")
 
     user_id = session_data.get("user_id")
     email = session_data.get("email")
@@ -88,7 +89,7 @@ def handler(event, context):
         current_count = len(active_keys)
 
         if current_count >= MAX_KEYS_PER_USER:
-            return _error_response(
+            return error_response(
                 400,
                 "max_keys_reached",
                 f"Maximum {MAX_KEYS_PER_USER} API keys allowed. Revoke an existing key to create a new one."
@@ -96,7 +97,7 @@ def handler(event, context):
 
     except Exception as e:
         logger.error(f"Error checking key count: {e}")
-        return _error_response(500, "internal_error", "Failed to create API key")
+        return error_response(500, "internal_error", "Failed to create API key")
 
     # Generate new API key
     api_key = f"dh_{secrets.token_urlsafe(32)}"
@@ -142,13 +143,13 @@ def handler(event, context):
         if error_code == "TransactionCanceledException":
             # Key already exists (hash collision - extremely rare) or race condition
             logger.warning(f"Key creation transaction failed for {user_id}: {e}")
-            return _error_response(
+            return error_response(
                 409,
                 "key_creation_failed",
                 "Failed to create key. Please try again."
             )
         logger.error(f"Error creating API key: {e}")
-        return _error_response(500, "internal_error", "Failed to create API key")
+        return error_response(500, "internal_error", "Failed to create API key")
 
     logger.info(f"New API key created for user {user_id}")
 
@@ -160,13 +161,4 @@ def handler(event, context):
             "key_id": key_hash[:16],
             "message": "API key created. Save this key - it won't be shown again.",
         }),
-    }
-
-
-def _error_response(status_code: int, code: str, message: str) -> dict:
-    """Generate error response."""
-    return {
-        "statusCode": status_code,
-        "headers": {"Content-Type": "application/json"},
-        "body": json.dumps({"error": {"code": code, "message": message}}),
     }

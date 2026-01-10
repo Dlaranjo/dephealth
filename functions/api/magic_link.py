@@ -97,7 +97,9 @@ def handler(event, context):
 
         if not verified_user:
             # Don't reveal whether email exists - same response as success
-            logger.info(f"Magic link requested for non-existent email: {email}")
+            # Log without full email for privacy (GDPR compliance)
+            email_prefix = email.split("@")[0][:3] if "@" in email else email[:3]
+            logger.info(f"Magic link requested for non-existent email: {email_prefix}***")
             return _timed_response(start_time, success_response({"message": success_message}, origin=origin))
 
     except Exception as e:
@@ -142,7 +144,10 @@ def handler(event, context):
             error_response(500, "internal_error", "Failed to send login email", origin=origin),
         )
 
-    logger.info(f"Magic link sent to {email}")
+    # Log without full email for privacy (GDPR compliance)
+    email_prefix = email.split("@")[0][:3] if "@" in email else email[:3]
+    email_domain = email.split("@")[1] if "@" in email else "unknown"
+    logger.info(f"Magic link sent to {email_prefix}***@{email_domain}")
 
     return _timed_response(start_time, success_response({"message": success_message}, origin=origin))
 

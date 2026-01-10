@@ -167,7 +167,10 @@ def handler(event, context):
         # Don't fail the signup if email fails - user can request resend
         # but log it for monitoring
 
-    logger.info(f"Signup initiated for {email}")
+    # Log without full email for privacy (GDPR compliance)
+    email_prefix = email.split("@")[0][:3] if "@" in email else email[:3]
+    email_domain = email.split("@")[1] if "@" in email else "unknown"
+    logger.info(f"Signup initiated for {email_prefix}***@{email_domain}")
 
     return _timed_response(start_time, success_response({"message": success_message}, origin=origin))
 

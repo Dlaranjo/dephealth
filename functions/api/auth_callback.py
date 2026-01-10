@@ -25,15 +25,19 @@ secretsmanager = boto3.client("secretsmanager")
 API_KEYS_TABLE = os.environ.get("API_KEYS_TABLE", "dephealth-api-keys")
 BASE_URL = os.environ.get("BASE_URL", "https://dephealth.laranjo.dev")
 
-# Cached session secret (loaded from Secrets Manager)
+# Cached session secret (loaded from Secrets Manager) with TTL
 _session_secret_cache = None
+_session_secret_cache_time = 0.0
+SESSION_SECRET_CACHE_TTL = 300  # 5 minutes - allows secret rotation to take effect
 
 
 def _get_session_secret() -> str:
-    """Retrieve session secret from Secrets Manager (cached)."""
-    global _session_secret_cache
+    """Retrieve session secret from Secrets Manager (cached with TTL)."""
+    import time
+    global _session_secret_cache, _session_secret_cache_time
 
-    if _session_secret_cache:
+    # Check if cache is still valid
+    if _session_secret_cache and (time.time() - _session_secret_cache_time) < SESSION_SECRET_CACHE_TTL:
         return _session_secret_cache
 
     # Read at runtime to allow tests to set this env var
@@ -53,6 +57,7 @@ def _get_session_secret() -> str:
         except json.JSONDecodeError:
             _session_secret_cache = secret_string
 
+        _session_secret_cache_time = time.time()
         return _session_secret_cache
     except ClientError as e:
         logger.error(f"Failed to retrieve session secret: {e}")
@@ -165,7 +170,10 @@ def handler(event, context):
 
     session_token = _create_session_token(session_data, session_secret)
 
-    logger.info(f"Session created for {email}")
+    # Log without full email for privacy (GDPR compliance)
+    email_prefix = email.split("@")[0][:3] if "@" in email else email[:3]
+    email_domain = email.split("@")[1] if "@" in email else "unknown"
+    logger.info(f"Session created for {email_prefix}***@{email_domain}")
 
     # Set session cookie and redirect to dashboard
     cookie_value = f"session={session_token}; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age={SESSION_TTL_DAYS * 86400}"
@@ -176,6 +184,8 @@ def handler(event, context):
             "Location": f"{BASE_URL}/dashboard",
             "Set-Cookie": cookie_value,
             "Cache-Control": "no-store",
+            "Content-Security-Policy": "default-src 'none'",
+            "X-Content-Type-Options": "nosniff",
         },
         "body": "",
     }
@@ -232,6 +242,8 @@ def _redirect_with_error(code: str, message: str) -> dict:
         "headers": {
             "Location": f"{BASE_URL}/login?{redirect_params}",
             "Cache-Control": "no-store",
+            "Content-Security-Policy": "default-src 'none'",
+            "X-Content-Type-Options": "nosniff",
         },
         "body": "",
     }

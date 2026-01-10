@@ -736,11 +736,9 @@ class TestRevokeApiKeyContract:
 
         result = handler(api_gateway_event, {})
 
-        assert result["statusCode"] == 200
-        assert_json_content_type(result)
-
-        body = json.loads(result["body"])
-        assert "message" in body
+        # 204 No Content is the correct status for successful DELETE
+        assert result["statusCode"] == 204
+        assert result["body"] == ""
 
     @mock_aws
     def test_404_key_not_found(self, mock_dynamodb, api_gateway_event):

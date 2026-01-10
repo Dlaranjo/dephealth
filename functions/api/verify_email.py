@@ -105,12 +105,23 @@ def handler(event, context):
         logger.warning(f"Failed to delete pending record: {e}")
         # Not critical - continue anyway
 
-    logger.info(f"Email verified for {email}, API key created")
+    # Log without full email for privacy (GDPR compliance)
+    email_prefix = email.split("@")[0][:3] if "@" in email else email[:3]
+    email_domain = email.split("@")[1] if "@" in email else "unknown"
+    logger.info(f"Email verified for {email_prefix}***@{email_domain}, API key created")
 
     # Store API key in short-lived cookie for one-time display
-    # NOT HttpOnly - dashboard JS needs to read and display it once
-    # Short Max-Age (60s) + immediate deletion by JS minimizes exposure window
-    # More secure than passing key in URL which appears in logs/history/referrer
+    # SECURITY CONSIDERATIONS:
+    # - NOT HttpOnly because dashboard JS needs to read and display it once
+    # - Short Max-Age (60s) minimizes exposure window
+    # - Secure + SameSite=Strict prevents CSRF and network interception
+    # - Path=/dashboard limits cookie scope
+    # - More secure than URL (appears in logs/history/referrer)
+    # - CSP header on redirect helps mitigate XSS during transit
+    # TODO: For enhanced security, implement server-side display token approach:
+    #       1. Store display_token -> api_key mapping in DynamoDB (60s TTL)
+    #       2. Redirect with display_token in URL
+    #       3. Dashboard fetches API key via authenticated endpoint (one-time use)
     cookie_value = (
         f"new_api_key={api_key}; "
         f"Path=/dashboard; "  # Limit cookie scope to dashboard path
@@ -125,6 +136,9 @@ def handler(event, context):
             "Location": f"{BASE_URL}/dashboard?verified=true",
             "Set-Cookie": cookie_value,
             "Cache-Control": "no-store",
+            # Security headers to mitigate XSS during redirect
+            "Content-Security-Policy": "default-src 'none'",
+            "X-Content-Type-Options": "nosniff",
         },
         "body": "",
     }
@@ -141,6 +155,8 @@ def _redirect_with_error(code: str, message: str) -> dict:
         "headers": {
             "Location": f"{BASE_URL}/signup?{redirect_params}",
             "Cache-Control": "no-store",
+            "Content-Security-Policy": "default-src 'none'",
+            "X-Content-Type-Options": "nosniff",
         },
         "body": "",
     }
