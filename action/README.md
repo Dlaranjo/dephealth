@@ -45,7 +45,7 @@ Get your API key at [pkgwatch.laranjo.dev](https://pkgwatch.laranjo.dev).
 ### Basic Scan
 
 ```yaml
-name: Dependency Health Check
+name: PkgWatch Scan
 
 on:
   push:
@@ -103,7 +103,7 @@ jobs:
 ### Weekly Scheduled Scan
 
 ```yaml
-name: Weekly Dependency Audit
+name: Weekly PkgWatch Scan
 
 on:
   schedule:
@@ -159,7 +159,7 @@ Use `soft-fail: true` to set outputs and warnings without failing the workflow:
 ```
 
 This is useful for:
-- Gradual rollout of dependency health checks
+- Gradual rollout of package health checks
 - Informational scans that shouldn't block CI
 - Tracking health trends without enforcement
 

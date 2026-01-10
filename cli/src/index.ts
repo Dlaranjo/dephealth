@@ -293,7 +293,7 @@ async function prompt(question: string): Promise<string> {
 
 program
   .name("pkgwatch")
-  .description("Check npm package health scores from the command line")
+  .description("Monitor npm package health and catch risks early")
   .version(VERSION)
   .option("-q, --quiet", "Suppress non-essential output")
   .option("-v, --verbose", "Show detailed output")
