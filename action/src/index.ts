@@ -73,8 +73,12 @@ async function run(): Promise<void> {
 
     // Warn about packages that couldn't be found
     if (result.not_found && result.not_found.length > 0) {
+      const maxToShow = 10;
+      const shown = result.not_found.slice(0, maxToShow);
+      const remaining = result.not_found.length - shown.length;
+      const suffix = remaining > 0 ? ` (and ${remaining} more)` : "";
       core.warning(
-        `${result.not_found.length} package(s) not found in registry: ${result.not_found.join(", ")}`
+        `${result.not_found.length} package(s) not found in registry: ${shown.join(", ")}${suffix}`
       );
     }
 

@@ -101,6 +101,31 @@ describe("DepHealthClient", () => {
   });
 });
 
+describe("DepHealthClient - API Key Validation", () => {
+  it("rejects API keys without dh_ prefix", () => {
+    expect(() => new DepHealthClient("invalid-key")).toThrow(
+      "Invalid API key format. Keys should start with 'dh_'"
+    );
+  });
+
+  it("rejects empty API keys", () => {
+    expect(() => new DepHealthClient("")).toThrow(
+      "API key is required and cannot be empty"
+    );
+  });
+
+  it("rejects whitespace-only API keys", () => {
+    expect(() => new DepHealthClient("   ")).toThrow(
+      "API key is required and cannot be empty"
+    );
+  });
+
+  it("accepts valid dh_ prefixed keys", () => {
+    // Should not throw - we don't make actual requests, just verify construction
+    expect(() => new DepHealthClient("dh_valid_key")).not.toThrow();
+  });
+});
+
 describe("ApiClientError", () => {
   it("creates error with message, status, and code", () => {
     const error = new ApiClientError("Test error", 404, "not_found");

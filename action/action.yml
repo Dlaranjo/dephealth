@@ -46,6 +46,8 @@ outputs:
     description: 'True if fail-on threshold was exceeded'
   results:
     description: 'Full scan results as JSON string'
+  not-found-count:
+    description: 'Count of packages not found in registry'
 
 runs:
   using: 'node20'
