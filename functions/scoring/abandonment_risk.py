@@ -86,12 +86,17 @@ def calculate_abandonment_risk(data: dict, months: int = 12) -> dict:
     maintainers = data.get("active_contributors_90d", 1)
     if maintainers is None:
         maintainers = 1
+    # Guard against negative values which would cause bus_factor_risk > 1
+    if maintainers < 0:
+        logger.warning(f"Negative active_contributors_90d: {maintainers}, clamping to 1")
+        maintainers = 1
+    maintainers = max(1, maintainers)  # Defense in depth
     bus_factor_risk = math.exp(-maintainers / 2)
 
     # 3. Adoption risk: low downloads indicate abandonment risk
     # Use continuous logarithmic function instead of discrete steps
     # for consistency with other algorithms
-    downloads = data.get("weekly_downloads", 0) or 0
+    downloads = max(0, data.get("weekly_downloads", 0) or 0)  # Clamp negative
     # Scale: 10 downloads = 0.8 risk, 10K downloads = 0.2 risk, 1M+ = 0.1 risk
     # Formula: max(0.1, 0.9 - log10(downloads + 1) / 7)
     adoption_risk = max(0.1, min(0.9, 0.9 - math.log10(downloads + 1) / 7))
@@ -201,6 +206,19 @@ def get_risk_trend(historical_scores: list[float]) -> dict:
 
     recent = historical_scores[-1]
     previous = historical_scores[-2]
+
+    # Guard against None, NaN, or non-numeric values
+    try:
+        recent = float(recent) if recent is not None else 0.0
+        previous = float(previous) if previous is not None else 0.0
+        # Check for NaN (NaN != NaN is True)
+        if recent != recent or previous != previous:
+            logger.warning("NaN detected in historical_scores, returning STABLE")
+            return {"trend": "STABLE", "change": 0.0}
+    except (TypeError, ValueError) as e:
+        logger.warning(f"Invalid values in historical_scores: {e}")
+        return {"trend": "STABLE", "change": 0.0}
+
     change = recent - previous
 
     if abs(change) < 5:

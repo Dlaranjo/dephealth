@@ -33,6 +33,7 @@ const apiStack = new ApiStack(app, "DepHealthApi", {
   description: "DepHealth REST API",
   packagesTable: storageStack.packagesTable,
   apiKeysTable: storageStack.apiKeysTable,
+  alertTopic: pipelineStack.alertTopic,
 });
 
 // Add tags to all resources

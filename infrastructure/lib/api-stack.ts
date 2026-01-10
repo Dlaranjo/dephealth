@@ -30,11 +30,32 @@ export class ApiStack extends cdk.Stack {
     const { packagesTable, apiKeysTable, alertTopic } = props;
 
     // ===========================================
+    // Stripe Environment Variable Validation
+    // ===========================================
+    // Validate required Stripe price IDs at synth time for production deployments
+    const isProduction = process.env.CDK_ENV !== "dev";
+    if (isProduction) {
+      const requiredStripeVars = [
+        "STRIPE_PRICE_STARTER",
+        "STRIPE_PRICE_PRO",
+        "STRIPE_PRICE_BUSINESS",
+      ];
+      const missingVars = requiredStripeVars.filter((v) => !process.env[v]);
+      if (missingVars.length > 0) {
+        console.warn(
+          `WARNING: Missing Stripe price IDs for production: ${missingVars.join(", ")}. ` +
+          `Stripe webhook handler will not be able to map subscriptions to tiers.`
+        );
+      }
+    }
+
+    // ===========================================
     // Secrets Manager: Stripe Secrets
     // ===========================================
     const stripeSecret = new secretsmanager.Secret(this, "StripeSecret", {
       secretName: "dephealth/stripe-secret",
       description: "Stripe API secret key",
+      removalPolicy: cdk.RemovalPolicy.RETAIN, // Protect secrets from accidental deletion
     });
 
     const stripeWebhookSecret = new secretsmanager.Secret(
@@ -43,6 +64,7 @@ export class ApiStack extends cdk.Stack {
       {
         secretName: "dephealth/stripe-webhook",
         description: "Stripe webhook signing secret",
+        removalPolicy: cdk.RemovalPolicy.RETAIN, // Protect secrets from accidental deletion
       }
     );
 
@@ -210,6 +232,7 @@ export class ApiStack extends cdk.Stack {
         excludePunctuation: true,
         passwordLength: 64,
       },
+      removalPolicy: cdk.RemovalPolicy.RETAIN, // Protect secrets from accidental deletion
     });
 
     // Common props for auth handlers
@@ -354,7 +377,7 @@ export class ApiStack extends cdk.Stack {
         stageName: "v1",
         throttlingBurstLimit: 100,
         throttlingRateLimit: 50,
-        loggingLevel: apigateway.MethodLoggingLevel.INFO,
+        loggingLevel: apigateway.MethodLoggingLevel.ERROR, // ERROR only - INFO may log API keys in headers
         dataTraceEnabled: false,
         metricsEnabled: true,
         tracingEnabled: true, // Enable X-Ray tracing for end-to-end traces
@@ -579,6 +602,23 @@ export class ApiStack extends cdk.Stack {
             sampledRequestsEnabled: true,
           },
         },
+        // AWS Managed Rules - SQL Injection Protection
+        {
+          name: "AWSManagedRulesSQLiRuleSet",
+          priority: 27,
+          overrideAction: { none: {} },
+          statement: {
+            managedRuleGroupStatement: {
+              vendorName: "AWS",
+              name: "AWSManagedRulesSQLiRuleSet",
+            },
+          },
+          visibilityConfig: {
+            cloudWatchMetricsEnabled: true,
+            metricName: "SQLiRuleSet",
+            sampledRequestsEnabled: true,
+          },
+        },
         // Rate Limiting - 100 requests per 5 minutes per IP (20/min)
         // Legitimate CI/CD usage is ~10-20 requests/minute
         {
@@ -683,6 +723,17 @@ export class ApiStack extends cdk.Stack {
     createLambdaAlarms(scanHandler, "Scan");
     createLambdaAlarms(getUsageHandler, "GetUsage");
     createLambdaAlarms(stripeWebhookHandler, "StripeWebhook");
+    createLambdaAlarms(resetUsageHandler, "ResetUsage");
+
+    // Auth/signup Lambda alarms - critical for user access
+    createLambdaAlarms(signupHandler, "Signup");
+    createLambdaAlarms(verifyHandler, "VerifyEmail");
+    createLambdaAlarms(magicLinkHandler, "MagicLink");
+    createLambdaAlarms(authCallbackHandler, "AuthCallback");
+    createLambdaAlarms(authMeHandler, "AuthMe");
+    createLambdaAlarms(getApiKeysHandler, "GetApiKeys");
+    createLambdaAlarms(createApiKeyHandler, "CreateApiKey");
+    createLambdaAlarms(revokeApiKeyHandler, "RevokeApiKey");
 
     // API Gateway 5XX alarm
     const api5xxAlarm = new cloudwatch.Alarm(this, "Api5xxAlarm", {

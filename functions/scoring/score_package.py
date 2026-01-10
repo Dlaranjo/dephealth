@@ -10,21 +10,90 @@ Can be triggered:
 import json
 import logging
 import os
+import time
+import random
 from datetime import datetime, timezone
 from decimal import Decimal
+from typing import Optional, Callable, TypeVar
 
 import boto3
 from boto3.dynamodb.conditions import Key
+from botocore.exceptions import ClientError
 
 from health_score import calculate_health_score
 from abandonment_risk import calculate_abandonment_risk
+from shared.logging_utils import configure_structured_logging, set_request_id
 
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.INFO)
 
 # Defense in depth: skip scoring if package was scored recently
 # This prevents infinite loops if the DynamoDB Streams filter doesn't work as expected
 IDEMPOTENCY_WINDOW_SECONDS = int(os.environ.get("IDEMPOTENCY_WINDOW_SECONDS", "60"))
+
+# Retry configuration for DynamoDB operations
+DYNAMODB_MAX_RETRIES = 3
+DYNAMODB_BASE_DELAY = 0.1
+DYNAMODB_MAX_DELAY = 2.0
+
+T = TypeVar("T")
+
+
+def _retry_sync(
+    func: Callable[..., T],
+    *args,
+    max_retries: int = DYNAMODB_MAX_RETRIES,
+    base_delay: float = DYNAMODB_BASE_DELAY,
+    max_delay: float = DYNAMODB_MAX_DELAY,
+    retryable_exceptions: tuple = (ClientError,),
+    **kwargs
+) -> T:
+    """
+    Execute sync function with retry logic and exponential backoff.
+
+    Only retries on throttling/transient errors, not on validation errors.
+    """
+    last_exception: Optional[Exception] = None
+
+    for attempt in range(max_retries + 1):
+        try:
+            return func(*args, **kwargs)
+        except retryable_exceptions as e:
+            # Only retry on throttling errors, not on validation errors
+            if isinstance(e, ClientError):
+                error_code = e.response.get("Error", {}).get("Code", "")
+                if error_code not in (
+                    "ProvisionedThroughputExceededException",
+                    "ThrottlingException",
+                    "InternalServerError",
+                    "ServiceUnavailable",
+                ):
+                    raise  # Don't retry validation errors
+
+            last_exception = e
+
+            if attempt == max_retries:
+                logger.error(
+                    f"All {max_retries + 1} attempts failed for {func.__name__}",
+                    extra={
+                        "function": func.__name__,
+                        "attempts": max_retries + 1,
+                        "error_type": type(e).__name__,
+                    }
+                )
+                raise
+
+            # Exponential backoff with jitter
+            delay = min(base_delay * (2 ** attempt), max_delay)
+            jitter = random.uniform(0, delay * 0.3)
+            sleep_time = delay + jitter
+
+            logger.warning(
+                f"Attempt {attempt + 1}/{max_retries + 1} failed, "
+                f"retrying in {sleep_time:.2f}s: {type(e).__name__}"
+            )
+            time.sleep(sleep_time)
+
+    raise last_exception or RuntimeError("Unexpected retry state")
 
 
 def to_decimal(obj):
@@ -61,6 +130,17 @@ def handler(event, context):
     2. DynamoDB Streams or SQS batch: {"Records": [...]}
     3. Recalculate all: {"action": "recalculate_all"}
     """
+    # Initialize structured logging for CloudWatch Logs Insights queryability
+    configure_structured_logging()
+    request_id = set_request_id(event)
+    logger.info(
+        "Score calculation handler invoked",
+        extra={
+            "request_id": request_id,
+            "event_type": "stream_batch" if "Records" in event else event.get("action", "single_package"),
+        }
+    )
+
     if "Records" in event:
         # DynamoDB Streams or SQS batch processing
         return _process_stream_batch(event)
@@ -85,9 +165,12 @@ def _score_single_package(event: dict) -> dict:
 
     table = dynamodb.Table(PACKAGES_TABLE)
 
-    # Fetch package data
+    # Fetch package data with retry
     try:
-        response = table.get_item(Key={"pk": f"{ecosystem}#{name}", "sk": "LATEST"})
+        response = _retry_sync(
+            table.get_item,
+            Key={"pk": f"{ecosystem}#{name}", "sk": "LATEST"}
+        )
         item = response.get("Item")
 
         if not item:
@@ -95,11 +178,25 @@ def _score_single_package(event: dict) -> dict:
                 "statusCode": 404,
                 "body": json.dumps({"error": f"Package {name} not found"}),
             }
-    except Exception as e:
-        logger.error(f"Error fetching package: {e}")
+    except ClientError as e:
+        error_code = e.response.get("Error", {}).get("Code", "Unknown")
+        logger.error(
+            f"DynamoDB error fetching package {name}: {error_code}",
+            extra={"error_code": error_code, "package": name},
+            exc_info=True,
+        )
         return {
             "statusCode": 500,
-            "body": json.dumps({"error": str(e)}),
+            "body": json.dumps({"error": "Failed to fetch package data"}),
+        }
+    except Exception as e:
+        logger.error(
+            f"Unexpected error fetching package {name}: {type(e).__name__}",
+            exc_info=True,
+        )
+        return {
+            "statusCode": 500,
+            "body": json.dumps({"error": "Internal server error"}),
         }
 
     # Convert Decimals to floats for math operations
@@ -128,16 +225,18 @@ def _score_single_package(event: dict) -> dict:
     health_result = calculate_health_score(item)
     abandonment_result = calculate_abandonment_risk(item)
 
-    # Update package with scores
+    # Update package with scores (with retry)
     now = datetime.now(timezone.utc).isoformat()
     try:
-        table.update_item(
+        _retry_sync(
+            table.update_item,
             Key={"pk": f"{ecosystem}#{name}", "sk": "LATEST"},
             UpdateExpression="""
                 SET health_score = :hs,
                     risk_level = :rl,
                     score_components = :sc,
                     confidence = :conf,
+                    confidence_interval = :ci,
                     abandonment_risk = :ar,
                     scored_at = :now
             """,
@@ -146,15 +245,30 @@ def _score_single_package(event: dict) -> dict:
                 ":rl": health_result["risk_level"],
                 ":sc": to_decimal(health_result["components"]),
                 ":conf": to_decimal(health_result["confidence"]),
+                ":ci": to_decimal(health_result["confidence_interval"]),
                 ":ar": to_decimal(abandonment_result),
                 ":now": now,
             },
         )
-    except Exception as e:
-        logger.error(f"Error updating package scores: {e}")
+    except ClientError as e:
+        error_code = e.response.get("Error", {}).get("Code", "Unknown")
+        logger.error(
+            f"DynamoDB error updating scores for {name}: {error_code}",
+            extra={"error_code": error_code, "package": name},
+            exc_info=True,
+        )
         return {
             "statusCode": 500,
-            "body": json.dumps({"error": str(e)}),
+            "body": json.dumps({"error": "Failed to save package scores"}),
+        }
+    except Exception as e:
+        logger.error(
+            f"Unexpected error updating scores for {name}: {type(e).__name__}",
+            exc_info=True,
+        )
+        return {
+            "statusCode": 500,
+            "body": json.dumps({"error": "Internal server error"}),
         }
 
     return {
@@ -172,10 +286,15 @@ def _score_single_package(event: dict) -> dict:
 
 
 def _process_stream_batch(event: dict) -> dict:
-    """Process a batch of packages from DynamoDB Streams or SQS."""
+    """Process a batch of packages from DynamoDB Streams or SQS.
+
+    Returns batchItemFailures for DynamoDB Streams to enable partial batch retries.
+    See: https://docs.aws.amazon.com/lambda/latest/dg/with-ddb.html#services-ddb-batchfailurereporting
+    """
     successes = 0
     failures = 0
     skipped = 0
+    failed_item_ids = []  # Track failed record IDs for partial batch retry
 
     for record in event.get("Records", []):
         try:
@@ -213,6 +332,7 @@ def _process_stream_batch(event: dict) -> dict:
                 if "#" not in pk:
                     logger.warning(f"Invalid pk format in stream record: {pk}")
                     failures += 1
+                    # Don't add to failed_item_ids - this is a data issue, not transient
                     continue
 
                 ecosystem, name = pk.split("#", 1)
@@ -231,15 +351,35 @@ def _process_stream_batch(event: dict) -> dict:
                     successes += 1
             else:
                 failures += 1
+                # Track for retry if this is a DynamoDB Stream record with transient failure
+                if "dynamodb" in record and result["statusCode"] >= 500:
+                    event_id = record.get("eventID")
+                    if event_id:
+                        failed_item_ids.append(event_id)
                 logger.warning(f"Failed to score package: {result}")
 
         except Exception as e:
-            logger.error(f"Error processing record: {e}")
+            logger.error(f"Error processing record: {e}", exc_info=True)
             failures += 1
+            # Track for retry - transient errors should be retried
+            if "dynamodb" in record:
+                event_id = record.get("eventID")
+                if event_id:
+                    failed_item_ids.append(event_id)
 
-    logger.info(f"Stream processing complete: {successes} scored, {skipped} skipped, {failures} failed")
+    logger.info(
+        f"Stream processing complete: {successes} scored, {skipped} skipped, {failures} failed",
+        extra={
+            "successes": successes,
+            "skipped": skipped,
+            "failures": failures,
+            "failed_item_count": len(failed_item_ids),
+        }
+    )
 
-    return {
+    # Return batchItemFailures for DynamoDB Streams partial batch retry
+    # This allows Lambda to retry only the failed records instead of the entire batch
+    response = {
         "statusCode": 200,
         "body": json.dumps({
             "processed": successes + failures + skipped,
@@ -248,6 +388,14 @@ def _process_stream_batch(event: dict) -> dict:
             "failures": failures,
         }),
     }
+
+    # Add batchItemFailures if there are failed items to retry
+    if failed_item_ids:
+        response["batchItemFailures"] = [
+            {"itemIdentifier": item_id} for item_id in failed_item_ids
+        ]
+
+    return response
 
 
 def _recalculate_all() -> dict:

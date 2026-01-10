@@ -21,6 +21,8 @@ interface PipelineStackProps extends cdk.StackProps {
 }
 
 export class PipelineStack extends cdk.Stack {
+  public readonly alertTopic: sns.Topic;
+
   constructor(scope: Construct, id: string, props: PipelineStackProps) {
     super(scope, id, props);
 
@@ -36,6 +38,7 @@ export class PipelineStack extends cdk.Stack {
       {
         secretName: "dephealth/github-token",
         description: "GitHub Personal Access Token for API access",
+        removalPolicy: cdk.RemovalPolicy.RETAIN, // Protect secrets from accidental deletion
       }
     );
 
@@ -47,13 +50,15 @@ export class PipelineStack extends cdk.Stack {
     const dlq = new sqs.Queue(this, "PackageQueueDLQ", {
       queueName: "dephealth-package-dlq",
       retentionPeriod: cdk.Duration.days(14),
+      encryption: sqs.QueueEncryption.SQS_MANAGED, // Enable encryption at rest
     });
 
     // Main queue for package processing jobs
     // Visibility timeout should be 6x Lambda timeout to prevent message reprocessing
     const packageQueue = new sqs.Queue(this, "PackageQueue", {
       queueName: "dephealth-package-queue",
-      visibilityTimeout: cdk.Duration.minutes(6), // > Lambda timeout (5 min)
+      visibilityTimeout: cdk.Duration.minutes(30), // 6x Lambda timeout (5 min) per AWS best practices
+      encryption: sqs.QueueEncryption.SQS_MANAGED, // Enable encryption at rest
       deadLetterQueue: {
         queue: dlq,
         maxReceiveCount: 3,
@@ -182,6 +187,7 @@ export class PipelineStack extends cdk.Stack {
     const streamsDlq = new sqs.Queue(this, "StreamsDLQ", {
       queueName: "dephealth-streams-dlq",
       retentionPeriod: cdk.Duration.days(14),
+      encryption: sqs.QueueEncryption.SQS_MANAGED, // Enable encryption at rest
     });
 
     // Add DynamoDB Streams trigger to calculate scores after data collection
@@ -303,7 +309,7 @@ export class PipelineStack extends cdk.Stack {
     // ===========================================
 
     // SNS Topic for alerts
-    const alertTopic = new sns.Topic(this, "AlertTopic", {
+    this.alertTopic = new sns.Topic(this, "AlertTopic", {
       topicName: "dephealth-alerts",
       displayName: "DepHealth Alerts",
     });
@@ -322,12 +328,12 @@ export class PipelineStack extends cdk.Stack {
         cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
       treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
     });
-    dlqAlarm.addAlarmAction(new cloudwatchActions.SnsAction(alertTopic));
-    dlqAlarm.addOkAction(new cloudwatchActions.SnsAction(alertTopic));
+    dlqAlarm.addAlarmAction(new cloudwatchActions.SnsAction(this.alertTopic));
+    dlqAlarm.addOkAction(new cloudwatchActions.SnsAction(this.alertTopic));
 
     // Streams DLQ alarm (defined earlier, action added here after alertTopic exists)
-    streamsDlqAlarm.addAlarmAction(new cloudwatchActions.SnsAction(alertTopic));
-    streamsDlqAlarm.addOkAction(new cloudwatchActions.SnsAction(alertTopic));
+    streamsDlqAlarm.addAlarmAction(new cloudwatchActions.SnsAction(this.alertTopic));
+    streamsDlqAlarm.addOkAction(new cloudwatchActions.SnsAction(this.alertTopic));
 
     // 2. Refresh Dispatcher Error Alarm (Critical - single point of failure)
     const dispatcherErrorAlarm = new cloudwatch.Alarm(
@@ -348,9 +354,9 @@ export class PipelineStack extends cdk.Stack {
       }
     );
     dispatcherErrorAlarm.addAlarmAction(
-      new cloudwatchActions.SnsAction(alertTopic)
+      new cloudwatchActions.SnsAction(this.alertTopic)
     );
-    dispatcherErrorAlarm.addOkAction(new cloudwatchActions.SnsAction(alertTopic));
+    dispatcherErrorAlarm.addOkAction(new cloudwatchActions.SnsAction(this.alertTopic));
 
     // 3. Package Collector Error Rate
     const collectorErrorAlarm = new cloudwatch.Alarm(
@@ -369,8 +375,8 @@ export class PipelineStack extends cdk.Stack {
         treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
       }
     );
-    collectorErrorAlarm.addAlarmAction(new cloudwatchActions.SnsAction(alertTopic));
-    collectorErrorAlarm.addOkAction(new cloudwatchActions.SnsAction(alertTopic));
+    collectorErrorAlarm.addAlarmAction(new cloudwatchActions.SnsAction(this.alertTopic));
+    collectorErrorAlarm.addOkAction(new cloudwatchActions.SnsAction(this.alertTopic));
 
     // 4. Score Calculator Error Rate
     const scoreErrorAlarm = new cloudwatch.Alarm(this, "ScoreErrorAlarm", {
@@ -385,8 +391,8 @@ export class PipelineStack extends cdk.Stack {
         cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
       treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
     });
-    scoreErrorAlarm.addAlarmAction(new cloudwatchActions.SnsAction(alertTopic));
-    scoreErrorAlarm.addOkAction(new cloudwatchActions.SnsAction(alertTopic));
+    scoreErrorAlarm.addAlarmAction(new cloudwatchActions.SnsAction(this.alertTopic));
+    scoreErrorAlarm.addOkAction(new cloudwatchActions.SnsAction(this.alertTopic));
 
     // 5. DynamoDB Throttling Alarm
     const throttleAlarm = new cloudwatch.Alarm(this, "DynamoThrottleAlarm", {
@@ -406,8 +412,8 @@ export class PipelineStack extends cdk.Stack {
         cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
       treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
     });
-    throttleAlarm.addAlarmAction(new cloudwatchActions.SnsAction(alertTopic));
-    throttleAlarm.addOkAction(new cloudwatchActions.SnsAction(alertTopic));
+    throttleAlarm.addAlarmAction(new cloudwatchActions.SnsAction(this.alertTopic));
+    throttleAlarm.addOkAction(new cloudwatchActions.SnsAction(this.alertTopic));
 
     // 6. Operations Dashboard
     new cloudwatch.Dashboard(this, "OperationsDashboard", {
@@ -500,7 +506,7 @@ export class PipelineStack extends cdk.Stack {
     });
 
     new cdk.CfnOutput(this, "AlertTopicArn", {
-      value: alertTopic.topicArn,
+      value: this.alertTopic.topicArn,
       description: "SNS topic ARN for alerts (subscribe email/Slack)",
       exportName: "DepHealthAlertTopicArn",
     });

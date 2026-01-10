@@ -7,9 +7,27 @@ export class StorageStack extends cdk.Stack {
   public readonly packagesTable: dynamodb.Table;
   public readonly apiKeysTable: dynamodb.Table;
   public readonly rawDataBucket: s3.Bucket;
+  public readonly accessLogsBucket: s3.Bucket;
 
   constructor(scope: Construct, id: string, props?: cdk.StackProps) {
     super(scope, id, props);
+
+    // ===========================================
+    // S3: Access Logs Bucket (must be created first)
+    // ===========================================
+    this.accessLogsBucket = new s3.Bucket(this, "AccessLogsBucket", {
+      bucketName: `dephealth-access-logs-${this.account}`,
+      removalPolicy: cdk.RemovalPolicy.RETAIN,
+      encryption: s3.BucketEncryption.S3_MANAGED,
+      blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
+      lifecycleRules: [
+        {
+          // Retain access logs for 90 days for audit purposes
+          expiration: cdk.Duration.days(90),
+          enabled: true,
+        },
+      ],
+    });
 
     // ===========================================
     // DynamoDB: Packages Table
@@ -25,6 +43,7 @@ export class StorageStack extends cdk.Stack {
       pointInTimeRecoverySpecification: {
         pointInTimeRecoveryEnabled: true,
       },
+      encryption: dynamodb.TableEncryption.AWS_MANAGED, // Use AWS-managed CMK for encryption
       removalPolicy: cdk.RemovalPolicy.RETAIN,
       // Enable streams for score calculation trigger
       stream: dynamodb.StreamViewType.NEW_IMAGE,
@@ -62,6 +81,7 @@ export class StorageStack extends cdk.Stack {
       pointInTimeRecoverySpecification: {
         pointInTimeRecoveryEnabled: true,
       },
+      encryption: dynamodb.TableEncryption.AWS_MANAGED, // Use AWS-managed CMK for encryption
       removalPolicy: cdk.RemovalPolicy.RETAIN,
       timeToLiveAttribute: "ttl", // Enable TTL for auto-expiring PENDING records
     });
@@ -125,6 +145,8 @@ export class StorageStack extends cdk.Stack {
       removalPolicy: cdk.RemovalPolicy.RETAIN,
       encryption: s3.BucketEncryption.S3_MANAGED,
       blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
+      serverAccessLogsBucket: this.accessLogsBucket, // Enable access logging for audit
+      serverAccessLogsPrefix: "raw-data-bucket/",
       lifecycleRules: [
         {
           // Delete raw data after 7 days (we only need it for debugging)

@@ -92,6 +92,19 @@ def _issue_response_score(data: dict) -> float:
     if avg_response_hours is None:
         return 0.5  # Neutral if no data
 
+    # Guard against NaN, infinity, and negative values
+    try:
+        avg_response_hours = float(avg_response_hours)
+        if math.isnan(avg_response_hours) or math.isinf(avg_response_hours):
+            logger.warning(f"Invalid avg_issue_response_hours: {avg_response_hours}")
+            return 0.5
+        if avg_response_hours < 0:
+            logger.warning(f"Negative avg_issue_response_hours: {avg_response_hours}")
+            avg_response_hours = 0
+    except (TypeError, ValueError):
+        logger.warning(f"Non-numeric avg_issue_response_hours: {type(avg_response_hours)}")
+        return 0.5
+
     if avg_response_hours <= 24:
         return 1.0
     elif avg_response_hours <= 72:
@@ -112,6 +125,20 @@ def _pr_velocity_score(data: dict) -> float:
     """
     merged = data.get("prs_merged_90d", 0)
     opened = data.get("prs_opened_90d", 0)
+
+    # Handle None values (explicit None differs from missing key with default)
+    if merged is None:
+        merged = 0
+    if opened is None:
+        opened = 0
+
+    # Guard against non-numeric and negative values
+    try:
+        merged = max(0, int(merged))
+        opened = max(0, int(opened))
+    except (TypeError, ValueError):
+        logger.warning(f"Non-numeric PR values: merged={merged}, opened={opened}")
+        return 0.5
 
     if opened == 0:
         return 0.5  # No PRs is neutral (could be stable package)
@@ -285,7 +312,15 @@ def _community_health(data: dict) -> float:
     """
     # Contributors: log-scaled continuous
     # log10(50) ~= 1.7, normalize so 50+ contributors = ~1.0
-    contributors = data.get("total_contributors", 1) or 1
+    # Handle 0 contributors as a data quality issue (distinct from None/missing)
+    contributors = data.get("total_contributors")
+    if contributors is None:
+        contributors = 1  # Missing data - use neutral default
+    elif contributors == 0:
+        # 0 contributors likely indicates data collection failure or very new package
+        logger.warning("total_contributors is 0 - possible data collection issue")
+        contributors = 1  # Treat as single maintainer for scoring
+    contributors = max(1, contributors)  # Defense in depth
     contributor_score = min(math.log10(contributors + 1) / 1.7, 1.0)
 
     # Issue response time: measures community engagement and maintainer interaction
@@ -328,11 +363,21 @@ def _security_health(data: dict) -> float:
         openssf_score = 0.3  # Penalize missing security data
 
     # Vulnerability assessment (same logic as before)
-    advisories = data.get("advisories", []) or []
+    # Limit to first 1000 advisories to prevent DoS from malformed data
+    MAX_ADVISORIES = 1000
+    advisories = (data.get("advisories", []) or [])[:MAX_ADVISORIES]
     # Defensive: ensure each advisory is a dict before calling .get()
-    critical = sum(1 for a in advisories if isinstance(a, dict) and a.get("severity") == "CRITICAL")
-    high = sum(1 for a in advisories if isinstance(a, dict) and a.get("severity") == "HIGH")
-    medium = sum(1 for a in advisories if isinstance(a, dict) and a.get("severity") == "MEDIUM")
+    # Single pass through advisories for efficiency
+    critical = high = medium = 0
+    for a in advisories:
+        if isinstance(a, dict):
+            severity = a.get("severity")
+            if severity == "CRITICAL":
+                critical += 1
+            elif severity == "HIGH":
+                high += 1
+            elif severity == "MEDIUM":
+                medium += 1
 
     # Weighted vulnerability score (higher = worse)
     vuln_score = critical * 3 + high * 2 + medium * 1
@@ -341,9 +386,11 @@ def _security_health(data: dict) -> float:
     vulnerability_score = 1 / (1 + math.exp((vuln_score - 2) / 1.5))
 
     # Security policy check (from OpenSSF checks if available)
-    openssf_checks = data.get("openssf_checks", []) or []
+    # Limit to first 100 checks to prevent DoS from malformed data
+    MAX_OPENSSF_CHECKS = 100
+    openssf_checks = (data.get("openssf_checks", []) or [])[:MAX_OPENSSF_CHECKS]
     has_security_policy = any(
-        c.get("name") == "Security-Policy" and c.get("score", 0) >= 5
+        isinstance(c, dict) and c.get("name") == "Security-Policy" and c.get("score", 0) >= 5
         for c in openssf_checks
     )
     security_policy_score = 1.0 if has_security_policy else 0.3
