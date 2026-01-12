@@ -453,6 +453,46 @@ export class ApiStack extends cdk.Stack {
     });
 
     // ===========================================
+    // Gateway Responses (CORS headers for API Gateway errors)
+    // ===========================================
+    // When API Gateway returns errors (e.g., validation failures), these ensure
+    // CORS headers are included so the browser can read the error message.
+
+    const corsResponseHeaders = {
+      "Access-Control-Allow-Origin": "'https://pkgwatch.laranjo.dev'",
+      "Access-Control-Allow-Headers":
+        "'Content-Type,X-API-Key,Authorization,Cookie'",
+      "Access-Control-Allow-Methods": "'GET,POST,DELETE,OPTIONS'",
+      "Access-Control-Allow-Credentials": "'true'",
+    };
+
+    // 4XX errors (client errors like validation failures)
+    this.api.addGatewayResponse("Default4XX", {
+      type: apigateway.ResponseType.DEFAULT_4XX,
+      responseHeaders: corsResponseHeaders,
+    });
+
+    // 5XX errors (server errors)
+    this.api.addGatewayResponse("Default5XX", {
+      type: apigateway.ResponseType.DEFAULT_5XX,
+      responseHeaders: corsResponseHeaders,
+    });
+
+    // Specific: Bad request body (validation failures)
+    this.api.addGatewayResponse("BadRequestBody", {
+      type: apigateway.ResponseType.BAD_REQUEST_BODY,
+      responseHeaders: corsResponseHeaders,
+      templates: {
+        "application/json": JSON.stringify({
+          error: {
+            code: "validation_error",
+            message: "$context.error.validationErrorString",
+          },
+        }),
+      },
+    });
+
+    // ===========================================
     // Request Validators & Models (Security - validate POST bodies before Lambda)
     // ===========================================
 
