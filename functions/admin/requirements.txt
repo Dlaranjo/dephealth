@@ -1,0 +1,2 @@
+# Admin Lambda functions dependencies
+# boto3 is provided by Lambda runtime

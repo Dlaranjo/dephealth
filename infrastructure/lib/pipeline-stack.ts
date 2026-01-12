@@ -102,6 +102,22 @@ export class PipelineStack extends cdk.Stack {
       },
     });
 
+    // Bundle admin functions
+    const adminCode = lambda.Code.fromAsset(functionsDir, {
+      bundling: {
+        image: lambda.Runtime.PYTHON_3_12.bundlingImage,
+        command: [
+          "bash",
+          "-c",
+          [
+            "cp -r /asset-input/admin/* /asset-output/",
+            "cp -r /asset-input/shared/* /asset-output/",
+            "cp -r /asset-input/shared /asset-output/",
+          ].join(" && "),
+        ],
+      },
+    });
+
     const commonLambdaProps = {
       runtime: lambda.Runtime.PYTHON_3_12,
       memorySize: 512, // Increased from 256 - doubles vCPU, ~40% faster cold starts
@@ -215,6 +231,27 @@ export class PipelineStack extends cdk.Stack {
       treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
     });
     // Note: Alarm action added after alertTopic is defined (see CloudWatch section)
+
+    // ===========================================
+    // Lambda: Seed Packages (Admin)
+    // ===========================================
+    // One-time/on-demand Lambda to populate database with top packages
+    const seedPackages = new lambda.Function(this, "SeedPackages", {
+      ...commonLambdaProps,
+      functionName: "pkgwatch-seed-packages",
+      handler: "seed_packages.handler",
+      code: adminCode,
+      timeout: cdk.Duration.minutes(10), // Longer timeout for fetching package lists
+      memorySize: 1024, // More memory for parallel processing
+      description: "Seeds database with top npm and PyPI packages",
+      environment: {
+        ...commonLambdaProps.environment,
+        REFRESH_DISPATCHER_ARN: refreshDispatcher.functionArn,
+      },
+    });
+
+    packagesTable.grantReadWriteData(seedPackages);
+    refreshDispatcher.grantInvoke(seedPackages);
 
     // ===========================================
     // EventBridge: Scheduled Triggers
