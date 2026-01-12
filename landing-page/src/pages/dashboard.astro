@@ -375,6 +375,7 @@ import Layout from '../layouts/Layout.astro';
     const response = await fetch(url, {
       ...options,
       credentials: 'include',
+      cache: 'no-store',
       headers: {
         'Content-Type': 'application/json',
         ...options.headers,
