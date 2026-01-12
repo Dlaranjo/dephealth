@@ -276,15 +276,17 @@ export class ApiStack extends cdk.Stack {
     });
 
     // Grant SES permissions for email sending
-    // SECURITY: Restrict to domain identity only (no wildcard)
-    // Note: If still in SES sandbox mode, emails can only be sent to verified identities.
-    // Request production access at: https://console.aws.amazon.com/ses/home#/account
+    // TODO: Remove identity/* wildcard after SES production access is approved
+    // In sandbox mode, SES requires permission to both sender AND recipient identities
     const sesPolicy = new iam.PolicyStatement({
       effect: iam.Effect.ALLOW,
       actions: ["ses:SendEmail", "ses:SendRawEmail"],
       resources: [
         // Domain-level identity allows sending from any address @pkgwatch.laranjo.dev
         `arn:aws:ses:${this.region}:${this.account}:identity/pkgwatch.laranjo.dev`,
+        // Wildcard for verified recipient identities (required in sandbox mode)
+        // REMOVE THIS after production access is granted
+        `arn:aws:ses:${this.region}:${this.account}:identity/*`,
       ],
     });
 
