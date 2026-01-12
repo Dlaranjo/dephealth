@@ -1,6 +1,5 @@
 ---
 import Layout from '../layouts/Layout.astro'
-import Navbar from '../components/Navbar.astro'
 import Hero from '../components/Hero.astro'
 import Problem from '../components/Problem.astro'
 import LiveDemo from '../components/LiveDemo.astro'
@@ -8,21 +7,16 @@ import Terminal from '../components/Terminal.astro'
 import Features from '../components/Features.astro'
 import DevTools from '../components/DevTools.astro'
 import CTA from '../components/CTA.astro'
-import Footer from '../components/Footer.astro'
 
 const FORM_ID = 'meeoyzeo'
 ---
 
-<Layout title="PkgWatch - Know which packages will fail before they break your build">
-  <Navbar />
-  <main id="main-content" class="max-w-5xl mx-auto px-4 sm:px-6 pt-20">
-    <Hero formId={FORM_ID} />
-    <Problem />
-    <LiveDemo />
-    <Terminal />
-    <Features />
-    <DevTools />
-    <CTA formId={FORM_ID} />
-    <Footer />
-  </main>
+<Layout title="PkgWatch - Know which packages will fail before they break your build" mainClass="max-w-5xl mx-auto px-4 sm:px-6 pt-20">
+  <Hero formId={FORM_ID} />
+  <Problem />
+  <LiveDemo />
+  <Terminal />
+  <Features />
+  <DevTools />
+  <CTA formId={FORM_ID} />
 </Layout>

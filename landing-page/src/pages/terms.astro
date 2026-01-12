@@ -1,15 +1,10 @@
 ---
 import Layout from '../layouts/Layout.astro';
-import Navbar from '../components/Navbar.astro';
-import Footer from '../components/Footer.astro';
 
 const lastUpdated = '2026-01-10';
 ---
 
-<Layout title="Terms of Service | PkgWatch">
-  <Navbar />
-
-  <main id="main-content" class="max-w-3xl mx-auto px-4 py-24 pt-32">
+<Layout title="Terms of Service | PkgWatch" mainClass="max-w-3xl mx-auto px-4 py-24 pt-32">
     <h1 class="text-4xl font-bold text-white mb-4">Terms of Service</h1>
     <p class="text-zinc-400 mb-8">Last updated: {lastUpdated}</p>
 
@@ -146,7 +141,4 @@ const lastUpdated = '2026-01-10';
         </p>
       </section>
     </div>
-  </main>
-
-  <Footer />
 </Layout>

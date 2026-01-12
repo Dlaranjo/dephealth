@@ -1,13 +1,8 @@
 ---
 import Layout from '../layouts/Layout.astro';
-import Navbar from '../components/Navbar.astro';
-import Footer from '../components/Footer.astro';
 ---
 
-<Layout title="Dashboard | PkgWatch">
-  <Navbar />
-
-  <main id="main-content" class="max-w-4xl mx-auto px-4 py-24 pt-32">
+<Layout title="Dashboard | PkgWatch" mainClass="max-w-4xl mx-auto px-4 py-24 pt-32">
     <!-- Loading Skeleton (shown initially) -->
     <div id="dashboard-skeleton" class="space-y-8 animate-fade-in-up">
       <!-- Profile skeleton -->
@@ -158,7 +153,6 @@ import Footer from '../components/Footer.astro';
         </a>
       </section>
     </div>
-  </main>
 
   <!-- New Key Modal -->
   <div id="new-key-modal" class="hidden fixed inset-0 z-50" role="dialog" aria-modal="true" aria-labelledby="modal-title">
@@ -285,8 +279,6 @@ import Footer from '../components/Footer.astro';
       </div>
     </div>
   </div>
-
-  <Footer />
 </Layout>
 
 <script>
