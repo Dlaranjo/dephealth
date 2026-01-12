@@ -228,11 +228,11 @@ def handler(event, context):
     name = unquote(name)
 
     # Validate ecosystem
-    if ecosystem not in ["npm"]:  # Can expand later: "pypi", "maven", etc.
+    if ecosystem not in ["npm", "pypi"]:
         return error_response(
             400,
             "invalid_ecosystem",
-            f"Unsupported ecosystem: {ecosystem}. Supported: npm",
+            f"Unsupported ecosystem: {ecosystem}. Supported: npm, pypi",
             headers=cors_headers,
         )
 

@@ -935,7 +935,7 @@ class TestErrorResponseConsistency:
 
         from api.get_package import handler
 
-        api_gateway_event["pathParameters"] = {"ecosystem": "pypi", "name": "test"}
+        api_gateway_event["pathParameters"] = {"ecosystem": "maven", "name": "test"}
         api_gateway_event["headers"]["x-api-key"] = test_key
 
         result = handler(api_gateway_event, {})

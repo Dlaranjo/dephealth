@@ -27,6 +27,7 @@ logger.setLevel(logging.INFO)
 # Import collectors (these will be bundled with the Lambda)
 from depsdev_collector import get_package_info as get_depsdev_info
 from npm_collector import get_npm_metadata
+from pypi_collector import get_pypi_metadata, PYPI_PACKAGE_PATTERN as PYPI_NAME_PATTERN
 from github_collector import GitHubCollector, parse_github_url
 from bundlephobia_collector import get_bundle_size
 
@@ -69,6 +70,9 @@ NPM_PACKAGE_PATTERN = re.compile(
 
 # Maximum package name length per npm
 MAX_PACKAGE_NAME_LENGTH = 214
+
+# Maximum package name length for PyPI
+MAX_PYPI_PACKAGE_NAME_LENGTH = 128
 
 # Patterns to redact from error messages (security)
 _SENSITIVE_PATTERNS = [
@@ -122,19 +126,27 @@ def validate_message(body: dict) -> Tuple[bool, Optional[str]]:
         return False, "Missing 'name' field"
 
     # Validate ecosystem
-    if ecosystem not in ["npm"]:  # Add more as supported
+    if ecosystem not in ["npm", "pypi"]:
         return False, f"Unsupported ecosystem: {ecosystem}"
-
-    # Validate package name
-    if len(name) > MAX_PACKAGE_NAME_LENGTH:
-        return False, f"Package name too long: {len(name)} > {MAX_PACKAGE_NAME_LENGTH}"
 
     # Check for path traversal attempts first (security check)
     if ".." in name or name.startswith("/"):
         return False, "Invalid package name (path traversal detected)"
 
-    if not NPM_PACKAGE_PATTERN.match(name):
-        return False, "Invalid package name format"
+    # Ecosystem-specific validation
+    if ecosystem == "npm":
+        if len(name) > MAX_PACKAGE_NAME_LENGTH:
+            return False, f"Package name too long: {len(name)} > {MAX_PACKAGE_NAME_LENGTH}"
+        if not NPM_PACKAGE_PATTERN.match(name):
+            return False, "Invalid npm package name format"
+    elif ecosystem == "pypi":
+        if len(name) > MAX_PYPI_PACKAGE_NAME_LENGTH:
+            return False, f"Package name too long: {len(name)} > {MAX_PYPI_PACKAGE_NAME_LENGTH}"
+        # Normalize and validate PyPI package name
+        from pypi_collector import normalize_package_name
+        normalized = normalize_package_name(name)
+        if not PYPI_NAME_PATTERN.match(normalized):
+            return False, "Invalid PyPI package name format"
 
     return True, None
 
@@ -437,6 +449,45 @@ async def collect_package_data(ecosystem: str, name: str) -> dict:
             else:
                 combined_data["bundlephobia_error"] = bundle_result.get("error")
 
+    # 2b. PyPI data (for pypi ecosystem)
+    elif ecosystem == "pypi":
+        pypi_allowed = check_and_increment_external_rate_limit("pypi", 400)  # 80% of 500
+
+        if pypi_allowed:
+            try:
+                pypi_data = await get_pypi_metadata(name)
+                if "error" not in pypi_data:
+                    combined_data["pypi"] = pypi_data
+                    combined_data["sources"].append("pypi")
+
+                    # Map PyPI data to common fields
+                    combined_data["weekly_downloads"] = pypi_data.get("weekly_downloads", 0)
+                    combined_data["maintainers"] = pypi_data.get("maintainers", [])
+                    combined_data["maintainer_count"] = pypi_data.get("maintainer_count", 0)
+                    combined_data["is_deprecated"] = pypi_data.get("is_deprecated", False)
+                    combined_data["created_at"] = pypi_data.get("created_at")
+                    combined_data["last_published"] = pypi_data.get("last_published")
+
+                    # PyPI-specific fields
+                    combined_data["requires_python"] = pypi_data.get("requires_python")
+                    combined_data["development_status"] = pypi_data.get("development_status")
+                    combined_data["python_versions"] = pypi_data.get("python_versions", [])
+
+                    # Use PyPI repo URL as fallback
+                    if not combined_data.get("repository_url"):
+                        combined_data["repository_url"] = pypi_data.get("repository_url")
+                else:
+                    combined_data["pypi_error"] = pypi_data.get("error")
+            except CircuitOpenError:
+                logger.warning(f"PyPI circuit open for {name}")
+                combined_data["pypi_error"] = "circuit_open"
+            except Exception as e:
+                logger.error(f"Failed to fetch PyPI data for {name}: {e}")
+                combined_data["pypi_error"] = _sanitize_error(str(e))
+        else:
+            logger.warning(f"PyPI rate limit reached, skipping for {name}")
+            combined_data["pypi_error"] = "rate_limit_exceeded"
+
     # 3. GitHub data (secondary - rate limited, with circuit breaker)
     repo_url = combined_data.get("repository_url")
     if repo_url:
@@ -580,11 +631,15 @@ def store_package_data(ecosystem: str, name: str, data: dict, tier: int):
         "module_type": data.get("module_type", "commonjs"),
         "has_exports": data.get("has_exports", False),
         "engines": data.get("engines"),
-        # Bundle size (DX signals)
+        # Bundle size (DX signals - npm only)
         "bundle_size": data.get("bundle_size"),
         "bundle_size_gzip": data.get("bundle_size_gzip"),
         "bundle_size_category": data.get("bundle_size_category"),
         "bundle_dependency_count": data.get("bundle_dependency_count"),
+        # PyPI-specific fields
+        "requires_python": data.get("requires_python"),
+        "development_status": data.get("development_status"),
+        "python_versions": data.get("python_versions", []),
         # Metadata
         "repository_url": data.get("repository_url"),
         "licenses": data.get("licenses", []),

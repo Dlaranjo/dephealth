@@ -2083,7 +2083,7 @@ class TestMessageValidation:
         """Unsupported ecosystem should fail validation."""
         from package_collector import validate_message
 
-        message = {"ecosystem": "pypi", "name": "requests"}
+        message = {"ecosystem": "maven", "name": "com.example:artifact"}
         is_valid, error = validate_message(message)
 
         assert is_valid is False
@@ -2108,7 +2108,7 @@ class TestMessageValidation:
         is_valid, error = validate_message(message)
 
         assert is_valid is False
-        assert "Invalid package name format" in error
+        assert "Invalid npm package name format" in error
 
     def test_validate_path_traversal_attempt(self):
         """Path traversal attempts should fail validation."""

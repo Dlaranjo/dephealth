@@ -17,7 +17,7 @@ MAX_KEYS_PER_USER = 5
 DEMO_REQUESTS_PER_HOUR = 20
 
 # API configuration
-SUPPORTED_ECOSYSTEMS = ["npm"]
+SUPPORTED_ECOSYSTEMS = ["npm", "pypi"]
 
 # Scoring
 RISK_LEVELS = ["CRITICAL", "HIGH", "MEDIUM", "LOW"]
@@ -32,6 +32,8 @@ SCORE_COMPONENTS = [
 # External APIs
 DEPSDEV_API = "https://api.deps.dev/v3"
 NPM_REGISTRY = "https://registry.npmjs.org"
+PYPI_API = "https://pypi.org/pypi"
+PYPISTATS_API = "https://pypistats.org/api"
 GITHUB_API = "https://api.github.com"
 BUNDLEPHOBIA_API = "https://bundlephobia.com/api/size"
 

@@ -87,7 +87,7 @@ class TestGetPackageHandler:
         from api.get_package import handler
 
         table, test_key = seeded_api_keys_table
-        api_gateway_event["pathParameters"] = {"ecosystem": "pypi", "name": "lodash"}
+        api_gateway_event["pathParameters"] = {"ecosystem": "maven", "name": "lodash"}
         api_gateway_event["headers"]["x-api-key"] = test_key
 
         result = handler(api_gateway_event, {})

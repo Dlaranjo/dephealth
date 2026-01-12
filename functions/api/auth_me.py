@@ -66,15 +66,30 @@ def handler(event, context):
         )
         items = response.get("Items", [])
 
-        # Find the primary API key (not PENDING)
-        user_record = None
+        # Separate API keys from metadata records
+        api_keys = []
+        user_meta = None
         for item in items:
-            if item.get("sk") != "PENDING":
-                user_record = item
-                break
+            sk = item.get("sk", "")
+            if sk == "PENDING":
+                continue
+            elif sk == "USER_META":
+                user_meta = item
+            else:
+                api_keys.append(item)
 
-        if not user_record:
+        if not api_keys:
             return error_response(404, "user_not_found", "User account not found", origin=origin)
+
+        # Aggregate requests_this_month across ALL API keys
+        total_requests = sum(
+            int(key.get("requests_this_month", 0))
+            for key in api_keys
+        )
+
+        # Use the first key for metadata (tier, created_at, etc.)
+        # All keys should have the same tier
+        primary_key = api_keys[0]
 
         # Return user info with CORS headers
         response_headers = {"Content-Type": "application/json"}
@@ -86,11 +101,11 @@ def handler(event, context):
             "body": json.dumps({
                 "user_id": user_id,
                 "email": email,
-                "tier": user_record.get("tier", "free"),
-                "requests_this_month": user_record.get("requests_this_month", 0),
-                "monthly_limit": TIER_LIMITS.get(user_record.get("tier", "free"), TIER_LIMITS["free"]),
-                "created_at": user_record.get("created_at"),
-                "last_login": user_record.get("last_login"),
+                "tier": primary_key.get("tier", "free"),
+                "requests_this_month": total_requests,
+                "monthly_limit": TIER_LIMITS.get(primary_key.get("tier", "free"), TIER_LIMITS["free"]),
+                "created_at": primary_key.get("created_at"),
+                "last_login": primary_key.get("last_login"),
             }, default=decimal_default),
         }
     except Exception as e:

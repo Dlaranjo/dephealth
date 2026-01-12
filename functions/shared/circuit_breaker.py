@@ -286,3 +286,12 @@ BUNDLEPHOBIA_CIRCUIT = InMemoryCircuitBreaker(
         success_threshold=2,
     )
 )
+
+PYPI_CIRCUIT = InMemoryCircuitBreaker(
+    "pypi",
+    CircuitBreakerConfig(
+        failure_threshold=10,
+        timeout_seconds=60,
+        success_threshold=3,
+    )
+)

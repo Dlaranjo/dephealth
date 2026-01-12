@@ -126,20 +126,53 @@ def handler(event, context):
     else:
         new_key_item["key_name"] = {"S": f"Key {current_count + 1}"}
 
-    # Atomically create key only if it doesn't already exist
+    # Check if USER_META exists to decide whether to initialize or increment
+    user_meta_exists = any(item.get("sk") == "USER_META" for item in items)
+
+    # Build transaction items
+    transact_items = [
+        {
+            "Put": {
+                "TableName": API_KEYS_TABLE,
+                "Item": new_key_item,
+                "ConditionExpression": "attribute_not_exists(pk) OR attribute_not_exists(sk)",
+            }
+        }
+    ]
+
+    if user_meta_exists:
+        # Increment existing USER_META.key_count
+        transact_items.append({
+            "Update": {
+                "TableName": API_KEYS_TABLE,
+                "Key": {
+                    "pk": {"S": user_id},
+                    "sk": {"S": "USER_META"},
+                },
+                "UpdateExpression": "SET key_count = key_count + :inc",
+                "ExpressionAttributeValues": {
+                    ":inc": {"N": "1"},
+                },
+            }
+        })
+    else:
+        # Create USER_META with key_count = current_count + 1
+        transact_items.append({
+            "Put": {
+                "TableName": API_KEYS_TABLE,
+                "Item": {
+                    "pk": {"S": user_id},
+                    "sk": {"S": "USER_META"},
+                    "key_count": {"N": str(current_count + 1)},
+                },
+                "ConditionExpression": "attribute_not_exists(pk) OR attribute_not_exists(sk)",
+            }
+        })
+
+    # Atomically create key and update USER_META
     # This prevents race conditions where the same key hash could be created twice
     try:
-        dynamodb_client.transact_write_items(
-            TransactItems=[
-                {
-                    "Put": {
-                        "TableName": API_KEYS_TABLE,
-                        "Item": new_key_item,
-                        "ConditionExpression": "attribute_not_exists(pk) OR attribute_not_exists(sk)",
-                    }
-                }
-            ]
-        )
+        dynamodb_client.transact_write_items(TransactItems=transact_items)
     except ClientError as e:
         error_code = e.response.get("Error", {}).get("Code", "")
         if error_code == "TransactionCanceledException":
