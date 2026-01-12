@@ -1,5 +1,6 @@
 ---
-const popularPackages = ['express', 'lodash', 'react', 'webpack', 'axios', 'typescript', 'eslint', 'jest']
+const npmPackages = ['express', 'lodash', 'react', 'webpack', 'axios', 'typescript']
+const pypiPackages = ['requests', 'django', 'flask', 'numpy', 'pandas', 'fastapi']
 ---
 
 <section id="demo" class="py-16 border-t border-[#1a1a1f] animate-fade-in-up stagger-2 opacity-0">
@@ -17,6 +18,30 @@ const popularPackages = ['express', 'lodash', 'react', 'webpack', 'axios', 'type
 
   <!-- Demo Input -->
   <div class="max-w-2xl">
+    <!-- Ecosystem Toggle -->
+    <div class="flex gap-2 mb-4" role="tablist" aria-label="Select package ecosystem">
+      <button
+        id="toggle-npm"
+        role="tab"
+        aria-selected="true"
+        aria-controls="quick-picks"
+        class="ecosystem-toggle px-4 py-2 text-sm font-medium rounded-lg transition-all bg-blue-600 text-white"
+        data-ecosystem="npm"
+      >
+        npm
+      </button>
+      <button
+        id="toggle-pypi"
+        role="tab"
+        aria-selected="false"
+        aria-controls="quick-picks"
+        class="ecosystem-toggle px-4 py-2 text-sm font-medium rounded-lg transition-all bg-[#111113] border border-[#1a1a1f] text-zinc-400 hover:border-blue-500/50 hover:text-white"
+        data-ecosystem="pypi"
+      >
+        PyPI
+      </button>
+    </div>
+
     <div class="flex flex-col sm:flex-row gap-3 mb-4">
       <label for="package-input" class="sr-only">Package name</label>
       <input
@@ -40,16 +65,30 @@ const popularPackages = ['express', 'lodash', 'react', 'webpack', 'axios', 'type
     </div>
 
     <!-- Quick picks -->
-    <div class="flex flex-wrap gap-2 mb-8">
+    <div id="quick-picks" class="flex flex-wrap gap-2 mb-8" role="tabpanel">
       <span class="text-xs text-zinc-500 mr-2">Try:</span>
-      {popularPackages.map((pkg) => (
-        <button
-          class="quick-pick px-4 py-2 min-h-[44px] text-sm bg-[#111113] border border-[#1a1a1f] rounded-lg text-zinc-400 hover:border-blue-500/50 hover:text-white transition-all cursor-pointer"
-          data-package={pkg}
-        >
-          {pkg}
-        </button>
-      ))}
+      <div id="npm-packages" class="contents">
+        {npmPackages.map((pkg) => (
+          <button
+            class="quick-pick px-4 py-2 min-h-[44px] text-sm bg-[#111113] border border-[#1a1a1f] rounded-lg text-zinc-400 hover:border-blue-500/50 hover:text-white transition-all cursor-pointer"
+            data-package={pkg}
+            data-ecosystem="npm"
+          >
+            {pkg}
+          </button>
+        ))}
+      </div>
+      <div id="pypi-packages" class="contents hidden">
+        {pypiPackages.map((pkg) => (
+          <button
+            class="quick-pick px-4 py-2 min-h-[44px] text-sm bg-[#111113] border border-[#1a1a1f] rounded-lg text-zinc-400 hover:border-blue-500/50 hover:text-white transition-all cursor-pointer"
+            data-package={pkg}
+            data-ecosystem="pypi"
+          >
+            {pkg}
+          </button>
+        ))}
+      </div>
     </div>
 
     <!-- Results -->
@@ -153,6 +192,55 @@ const popularPackages = ['express', 'lodash', 'react', 'webpack', 'axios', 'type
   const loading = document.getElementById('demo-loading');
   const error = document.getElementById('demo-error');
   const quickPicks = document.querySelectorAll('.quick-pick');
+  const ecosystemToggles = document.querySelectorAll('.ecosystem-toggle');
+  const npmPackagesEl = document.getElementById('npm-packages');
+  const pypiPackagesEl = document.getElementById('pypi-packages');
+  const ecosystemLabel = document.getElementById('result-ecosystem');
+
+  // Track current ecosystem
+  let currentEcosystem = 'npm';
+
+  const placeholders: Record<string, string> = {
+    npm: 'Enter package name (e.g., express)',
+    pypi: 'Enter package name (e.g., requests)',
+  };
+
+  function setEcosystem(ecosystem: string) {
+    currentEcosystem = ecosystem;
+
+    // Update toggle buttons
+    ecosystemToggles.forEach((btn) => {
+      const btnEcosystem = btn.getAttribute('data-ecosystem');
+      if (btnEcosystem === ecosystem) {
+        btn.classList.remove('bg-[#111113]', 'border', 'border-[#1a1a1f]', 'text-zinc-400', 'hover:border-blue-500/50', 'hover:text-white');
+        btn.classList.add('bg-blue-600', 'text-white');
+        btn.setAttribute('aria-selected', 'true');
+      } else {
+        btn.classList.add('bg-[#111113]', 'border', 'border-[#1a1a1f]', 'text-zinc-400', 'hover:border-blue-500/50', 'hover:text-white');
+        btn.classList.remove('bg-blue-600', 'text-white');
+        btn.setAttribute('aria-selected', 'false');
+      }
+    });
+
+    // Update quick picks visibility
+    if (ecosystem === 'npm') {
+      npmPackagesEl?.classList.remove('hidden');
+      pypiPackagesEl?.classList.add('hidden');
+    } else {
+      npmPackagesEl?.classList.add('hidden');
+      pypiPackagesEl?.classList.remove('hidden');
+    }
+
+    // Update placeholder
+    if (input) {
+      input.placeholder = placeholders[ecosystem] || placeholders.npm;
+    }
+
+    // Clear input and hide results when switching
+    if (input) input.value = '';
+    results?.classList.add('hidden');
+    error?.classList.add('hidden');
+  }
 
   function formatNumber(num: number): string {
     if (num >= 1000000) return (num / 1000000).toFixed(1) + 'M';
@@ -170,8 +258,10 @@ const popularPackages = ['express', 'lodash', 'react', 'webpack', 'axios', 'type
     }
   }
 
-  async function checkPackage(packageName: string) {
+  async function checkPackage(packageName: string, ecosystem?: string) {
     if (!packageName.trim()) return;
+
+    const eco = ecosystem || currentEcosystem;
 
     checkBtn?.setAttribute('aria-busy', 'true');
     results?.classList.add('hidden');
@@ -179,7 +269,7 @@ const popularPackages = ['express', 'lodash', 'react', 'webpack', 'axios', 'type
     loading?.classList.remove('hidden');
 
     try {
-      const res = await fetch(`${API_BASE}/packages/npm/${encodeURIComponent(packageName)}`);
+      const res = await fetch(`${API_BASE}/packages/${eco}/${encodeURIComponent(packageName)}`);
       const data = await res.json();
 
       loading?.classList.add('hidden');
@@ -197,6 +287,9 @@ const popularPackages = ['express', 'lodash', 'react', 'webpack', 'axios', 'type
 
       const pkgEl = document.getElementById('result-package');
       if (pkgEl) pkgEl.textContent = data.package;
+
+      // Update ecosystem label
+      if (ecosystemLabel) ecosystemLabel.textContent = eco;
 
       const badge = document.getElementById('result-badge');
       if (badge) {
@@ -242,6 +335,14 @@ const popularPackages = ['express', 'lodash', 'react', 'webpack', 'axios', 'type
     }
   }
 
+  // Ecosystem toggle handlers
+  ecosystemToggles.forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const ecosystem = btn.getAttribute('data-ecosystem');
+      if (ecosystem) setEcosystem(ecosystem);
+    });
+  });
+
   checkBtn?.addEventListener('click', () => checkPackage(input?.value || ''));
   input?.addEventListener('keypress', (e) => {
     if (e.key === 'Enter') checkPackage(input.value);
@@ -250,9 +351,14 @@ const popularPackages = ['express', 'lodash', 'react', 'webpack', 'axios', 'type
   quickPicks.forEach((btn) => {
     btn.addEventListener('click', () => {
       const pkg = btn.getAttribute('data-package');
+      const ecosystem = btn.getAttribute('data-ecosystem');
       if (pkg && input) {
+        // Switch to the package's ecosystem if different
+        if (ecosystem && ecosystem !== currentEcosystem) {
+          setEcosystem(ecosystem);
+        }
         input.value = pkg;
-        checkPackage(pkg);
+        checkPackage(pkg, ecosystem || currentEcosystem);
       }
     });
   });
