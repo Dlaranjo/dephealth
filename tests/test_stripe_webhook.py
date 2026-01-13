@@ -317,3 +317,251 @@ class TestHandleSubscriptionDeleted:
         response = table.get_item(Key={"pk": "user_cancelled", "sk": key_hash})
         item = response.get("Item")
         assert item["tier"] == "free"
+
+    @mock_aws
+    def test_clears_cancellation_state_on_delete(self, mock_dynamodb):
+        """Should clear cancellation_pending and cancellation_date when subscription is deleted."""
+        os.environ["API_KEYS_TABLE"] = "pkgwatch-api-keys"
+
+        table = mock_dynamodb.Table("pkgwatch-api-keys")
+
+        key_hash = hashlib.sha256(b"pw_cancelled_pending").hexdigest()
+        table.put_item(
+            Item={
+                "pk": "user_cancelled_pending",
+                "sk": key_hash,
+                "key_hash": key_hash,
+                "email": "cancelled_pending@example.com",
+                "tier": "pro",
+                "stripe_customer_id": "cus_cancelled_pending",
+                "email_verified": True,
+                "cancellation_pending": True,
+                "cancellation_date": 1707955200,
+            }
+        )
+
+        from api.stripe_webhook import _handle_subscription_deleted
+
+        subscription = {
+            "customer": "cus_cancelled_pending",
+        }
+
+        _handle_subscription_deleted(subscription)
+
+        response = table.get_item(Key={"pk": "user_cancelled_pending", "sk": key_hash})
+        item = response.get("Item")
+        assert item["tier"] == "free"
+        assert item["cancellation_pending"] == False
+        assert item.get("cancellation_date") is None
+
+
+class TestHandleSubscriptionUpdatedCancellation:
+    """Tests for cancellation pending state tracking in _handle_subscription_updated."""
+
+    @mock_aws
+    def test_sets_cancellation_pending_when_cancel_at_period_end(self, mock_dynamodb):
+        """Should set cancellation_pending=True when cancel_at_period_end is True."""
+        os.environ["API_KEYS_TABLE"] = "pkgwatch-api-keys"
+        os.environ["STRIPE_PRICE_PRO"] = "price_pro_123"
+
+        table = mock_dynamodb.Table("pkgwatch-api-keys")
+
+        key_hash = hashlib.sha256(b"pw_cancelling").hexdigest()
+        table.put_item(
+            Item={
+                "pk": "user_cancelling",
+                "sk": key_hash,
+                "key_hash": key_hash,
+                "email": "cancelling@example.com",
+                "tier": "pro",
+                "stripe_customer_id": "cus_cancelling",
+                "email_verified": True,
+            }
+        )
+
+        # Re-import to pick up STRIPE_PRICE_PRO env var
+        import importlib
+        import api.stripe_webhook as webhook_module
+        importlib.reload(webhook_module)
+
+        subscription = {
+            "customer": "cus_cancelling",
+            "status": "active",
+            "cancel_at_period_end": True,
+            "current_period_end": 1707955200,  # Unix timestamp
+            "items": {
+                "data": [
+                    {"price": {"id": "price_pro_123"}}
+                ]
+            }
+        }
+
+        webhook_module._handle_subscription_updated(subscription)
+
+        response = table.get_item(Key={"pk": "user_cancelling", "sk": key_hash})
+        item = response.get("Item")
+        assert item["cancellation_pending"] == True
+        assert item["cancellation_date"] == 1707955200
+
+        # Clean up
+        del os.environ["STRIPE_PRICE_PRO"]
+
+    @mock_aws
+    def test_clears_cancellation_pending_when_resubscribed(self, mock_dynamodb):
+        """Should clear cancellation_pending when user resubscribes."""
+        os.environ["API_KEYS_TABLE"] = "pkgwatch-api-keys"
+        os.environ["STRIPE_PRICE_PRO"] = "price_pro_123"
+
+        table = mock_dynamodb.Table("pkgwatch-api-keys")
+
+        key_hash = hashlib.sha256(b"pw_resubscribing").hexdigest()
+        table.put_item(
+            Item={
+                "pk": "user_resubscribing",
+                "sk": key_hash,
+                "key_hash": key_hash,
+                "email": "resubscribing@example.com",
+                "tier": "pro",
+                "stripe_customer_id": "cus_resubscribing",
+                "email_verified": True,
+                "cancellation_pending": True,
+                "cancellation_date": 1707955200,
+            }
+        )
+
+        import importlib
+        import api.stripe_webhook as webhook_module
+        importlib.reload(webhook_module)
+
+        subscription = {
+            "customer": "cus_resubscribing",
+            "status": "active",
+            "cancel_at_period_end": False,  # User resubscribed
+            "items": {
+                "data": [
+                    {"price": {"id": "price_pro_123"}}
+                ]
+            }
+        }
+
+        webhook_module._handle_subscription_updated(subscription)
+
+        response = table.get_item(Key={"pk": "user_resubscribing", "sk": key_hash})
+        item = response.get("Item")
+        assert item["cancellation_pending"] == False
+        assert item.get("cancellation_date") is None
+
+        # Clean up
+        del os.environ["STRIPE_PRICE_PRO"]
+
+    @mock_aws
+    def test_ignores_non_active_status(self, mock_dynamodb):
+        """Should ignore subscription updates that are not active status."""
+        os.environ["API_KEYS_TABLE"] = "pkgwatch-api-keys"
+
+        table = mock_dynamodb.Table("pkgwatch-api-keys")
+
+        key_hash = hashlib.sha256(b"pw_inactive").hexdigest()
+        table.put_item(
+            Item={
+                "pk": "user_inactive",
+                "sk": key_hash,
+                "key_hash": key_hash,
+                "email": "inactive@example.com",
+                "tier": "pro",
+                "stripe_customer_id": "cus_inactive",
+                "email_verified": True,
+            }
+        )
+
+        from api.stripe_webhook import _handle_subscription_updated
+
+        subscription = {
+            "customer": "cus_inactive",
+            "status": "past_due",  # Not active
+            "cancel_at_period_end": True,
+            "current_period_end": 1707955200,
+        }
+
+        _handle_subscription_updated(subscription)
+
+        # Should not have been updated
+        response = table.get_item(Key={"pk": "user_inactive", "sk": key_hash})
+        item = response.get("Item")
+        assert "cancellation_pending" not in item
+
+
+class TestUpdateUserSubscriptionState:
+    """Tests for _update_user_subscription_state function."""
+
+    @mock_aws
+    def test_updates_tier_and_cancellation_state(self, mock_dynamodb):
+        """Should update both tier and cancellation state together."""
+        os.environ["API_KEYS_TABLE"] = "pkgwatch-api-keys"
+
+        table = mock_dynamodb.Table("pkgwatch-api-keys")
+
+        key_hash = hashlib.sha256(b"pw_combined").hexdigest()
+        table.put_item(
+            Item={
+                "pk": "user_combined",
+                "sk": key_hash,
+                "key_hash": key_hash,
+                "email": "combined@example.com",
+                "tier": "starter",
+                "stripe_customer_id": "cus_combined",
+                "email_verified": True,
+            }
+        )
+
+        from api.stripe_webhook import _update_user_subscription_state
+
+        _update_user_subscription_state(
+            customer_id="cus_combined",
+            tier="pro",
+            cancellation_pending=True,
+            cancellation_date=1707955200,
+        )
+
+        response = table.get_item(Key={"pk": "user_combined", "sk": key_hash})
+        item = response.get("Item")
+        assert item["tier"] == "pro"
+        assert item["cancellation_pending"] == True
+        assert item["cancellation_date"] == 1707955200
+
+    @mock_aws
+    def test_updates_only_cancellation_state(self, mock_dynamodb):
+        """Should update cancellation state without changing tier."""
+        os.environ["API_KEYS_TABLE"] = "pkgwatch-api-keys"
+
+        table = mock_dynamodb.Table("pkgwatch-api-keys")
+
+        key_hash = hashlib.sha256(b"pw_cancelonly").hexdigest()
+        table.put_item(
+            Item={
+                "pk": "user_cancelonly",
+                "sk": key_hash,
+                "key_hash": key_hash,
+                "email": "cancelonly@example.com",
+                "tier": "business",
+                "stripe_customer_id": "cus_cancelonly",
+                "email_verified": True,
+            }
+        )
+
+        from api.stripe_webhook import _update_user_subscription_state
+
+        _update_user_subscription_state(
+            customer_id="cus_cancelonly",
+            tier=None,  # Don't change tier
+            cancellation_pending=True,
+            cancellation_date=1707955200,
+        )
+
+        response = table.get_item(Key={"pk": "user_cancelonly", "sk": key_hash})
+        item = response.get("Item")
+        # Tier should be unchanged
+        assert item["tier"] == "business"
+        # Cancellation state should be updated
+        assert item["cancellation_pending"] == True
+        assert item["cancellation_date"] == 1707955200

@@ -272,6 +272,28 @@ export class ApiStack extends cdk.Stack {
     createCheckoutHandler.addToRolePolicy(stripeSecretPolicy);
     createCheckoutHandler.addToRolePolicy(sessionSecretPolicy);
 
+    // Create billing portal session handler
+    const createBillingPortalHandler = new lambda.Function(
+      this,
+      "CreateBillingPortalHandler",
+      {
+        ...commonLambdaProps,
+        functionName: "pkgwatch-api-create-billing-portal",
+        handler: "api.create_billing_portal.handler",
+        code: apiCodeWithShared,
+        description: "Create Stripe billing portal session for subscription management",
+        environment: {
+          ...commonLambdaProps.environment,
+          BASE_URL: "https://pkgwatch.laranjo.dev",
+          SESSION_SECRET_ARN: "pkgwatch/session-secret",
+        },
+      }
+    );
+
+    apiKeysTable.grantReadData(createBillingPortalHandler);
+    createBillingPortalHandler.addToRolePolicy(stripeSecretPolicy);
+    createBillingPortalHandler.addToRolePolicy(sessionSecretPolicy);
+
     // Common props for auth handlers
     const authLambdaProps = {
       ...commonLambdaProps,
@@ -479,6 +501,9 @@ export class ApiStack extends cdk.Stack {
             cachingEnabled: false,
           },
           "/checkout/create/POST": {
+            cachingEnabled: false,
+          },
+          "/billing-portal/create/POST": {
             cachingEnabled: false,
           },
         },
@@ -762,6 +787,14 @@ export class ApiStack extends cdk.Stack {
           "application/json": createCheckoutModel,
         },
       }
+    );
+
+    // POST /billing-portal/create (session auth - no body required)
+    const billingPortalResource = this.api.root.addResource("billing-portal");
+    const createBillingPortalResource = billingPortalResource.addResource("create");
+    createBillingPortalResource.addMethod(
+      "POST",
+      new apigateway.LambdaIntegration(createBillingPortalHandler)
     );
 
     // ===========================================
@@ -1052,6 +1085,7 @@ export class ApiStack extends cdk.Stack {
     createLambdaAlarms(getUsageHandler, "GetUsage");
     createLambdaAlarms(stripeWebhookHandler, "StripeWebhook");
     createLambdaAlarms(createCheckoutHandler, "CreateCheckout");
+    createLambdaAlarms(createBillingPortalHandler, "CreateBillingPortal");
     createLambdaAlarms(resetUsageHandler, "ResetUsage");
 
     // Auth/signup Lambda alarms - critical for user access

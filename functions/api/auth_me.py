@@ -103,6 +103,10 @@ def handler(event, context):
         }
         response_headers.update(get_cors_headers(origin))
 
+        # Get cancellation state if present
+        cancellation_pending = primary_key.get("cancellation_pending", False)
+        cancellation_date = primary_key.get("cancellation_date")
+
         return {
             "statusCode": 200,
             "headers": response_headers,
@@ -114,6 +118,8 @@ def handler(event, context):
                 "monthly_limit": TIER_LIMITS.get(primary_key.get("tier", "free"), TIER_LIMITS["free"]),
                 "created_at": primary_key.get("created_at"),
                 "last_login": primary_key.get("last_login"),
+                "cancellation_pending": cancellation_pending,
+                "cancellation_date": cancellation_date,
             }, default=decimal_default),
         }
     except Exception as e:

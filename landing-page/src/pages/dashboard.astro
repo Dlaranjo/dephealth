@@ -53,8 +53,37 @@ import Layout from '../layouts/Layout.astro';
           <span id="user-tier" class="px-3 py-1 text-xs font-semibold rounded-full bg-emerald-500/20 text-emerald-400 uppercase">
             Free
           </span>
+          <!-- Manage Subscription Button (hidden for free tier) -->
+          <button
+            id="manage-subscription-btn"
+            class="hidden px-3 py-1.5 text-xs font-medium text-zinc-400 hover:text-white border border-zinc-700 hover:border-zinc-500 rounded-lg transition flex items-center gap-1.5"
+          >
+            <svg aria-hidden="true" class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"></path>
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"></path>
+            </svg>
+            <span id="manage-subscription-text">Manage Subscription</span>
+            <svg aria-hidden="true" id="manage-subscription-loading" class="hidden w-3.5 h-3.5 animate-spin" fill="none" viewBox="0 0 24 24">
+              <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+              <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path>
+            </svg>
+          </button>
         </div>
       </section>
+
+      <!-- Cancellation Pending Banner -->
+      <div id="cancellation-banner" class="hidden bg-amber-500/10 border border-amber-500/30 rounded-lg p-4">
+        <p class="text-amber-400 text-sm flex items-center gap-2">
+          <svg aria-hidden="true" class="w-5 h-5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"></path>
+          </svg>
+          <span>
+            Your <span id="cancel-tier" class="font-semibold">Pro</span> subscription will end on
+            <span id="cancel-date" class="font-semibold">February 15, 2024</span>.
+            You'll retain full access until then.
+          </span>
+        </p>
+      </div>
 
       <!-- Usage Stats Card -->
       <section aria-labelledby="usage-heading" class="bg-zinc-900/50 border border-zinc-800 rounded-xl p-6">
@@ -299,6 +328,10 @@ import Layout from '../layouts/Layout.astro';
   const keysError = document.getElementById('keys-error');
   const keysErrorMessage = document.getElementById('keys-error-message');
   const noKeys = document.getElementById('no-keys');
+  const manageSubscriptionBtn = document.getElementById('manage-subscription-btn');
+  const cancellationBanner = document.getElementById('cancellation-banner');
+  const cancelTier = document.getElementById('cancel-tier');
+  const cancelDate = document.getElementById('cancel-date');
 
   // Modal elements
   const newKeyModal = document.getElementById('new-key-modal');
@@ -453,6 +486,18 @@ import Layout from '../layouts/Layout.astro';
     }
   }
 
+  async function createBillingPortalSession(): Promise<string> {
+    const response = await fetchWithAuth(`${API_BASE}/billing-portal/create`, {
+      method: 'POST',
+    });
+    if (!response.ok) {
+      const data = await response.json();
+      throw new Error(data.error?.message || 'Failed to open billing portal');
+    }
+    const data = await response.json();
+    return data.portal_url;
+  }
+
   function startCountdown(seconds: number): void {
     // Stop any existing countdown
     if (countdownInterval) {
@@ -540,6 +585,15 @@ import Layout from '../layouts/Layout.astro';
     keysError?.classList.add('hidden');
   }
 
+  function formatUnixTimestamp(timestamp: number): string {
+    const date = new Date(timestamp * 1000);
+    return date.toLocaleDateString('en-US', {
+      month: 'long',
+      day: 'numeric',
+      year: 'numeric',
+    });
+  }
+
   function updateUserInfo(userData: any): void {
     if (userEmail) userEmail.textContent = userData.email;
     if (userTier) {
@@ -550,11 +604,34 @@ import Layout from '../layouts/Layout.astro';
       userTier.classList.remove('bg-emerald-500/20', 'text-emerald-400', 'bg-purple-500/20', 'text-purple-400', 'bg-blue-500/20', 'text-blue-400');
       if (tier === 'pro') {
         userTier.classList.add('bg-purple-500/20', 'text-purple-400');
-      } else if (tier === 'enterprise') {
+      } else if (tier === 'business') {
         userTier.classList.add('bg-blue-500/20', 'text-blue-400');
       } else {
         userTier.classList.add('bg-emerald-500/20', 'text-emerald-400');
       }
+
+      // Show/hide manage subscription button based on tier
+      if (manageSubscriptionBtn) {
+        if (tier !== 'free') {
+          manageSubscriptionBtn.classList.remove('hidden');
+        } else {
+          manageSubscriptionBtn.classList.add('hidden');
+        }
+      }
+    }
+
+    // Handle cancellation pending banner
+    if (userData.cancellation_pending && userData.cancellation_date) {
+      if (cancellationBanner) cancellationBanner.classList.remove('hidden');
+      if (cancelTier) {
+        const tier = userData.tier || 'free';
+        cancelTier.textContent = tier.charAt(0).toUpperCase() + tier.slice(1);
+      }
+      if (cancelDate) {
+        cancelDate.textContent = formatUnixTimestamp(userData.cancellation_date);
+      }
+    } else {
+      if (cancellationBanner) cancellationBanner.classList.add('hidden');
     }
   }
 
@@ -797,6 +874,32 @@ import Layout from '../layouts/Layout.astro';
     }
   }
 
+  async function handleManageSubscription(): Promise<void> {
+    const textEl = document.getElementById('manage-subscription-text');
+    const loadingEl = document.getElementById('manage-subscription-loading');
+
+    if (manageSubscriptionBtn) (manageSubscriptionBtn as HTMLButtonElement).disabled = true;
+    textEl?.classList.add('hidden');
+    loadingEl?.classList.remove('hidden');
+
+    try {
+      const portalUrl = await createBillingPortalSession();
+      // Redirect to Stripe Billing Portal
+      window.location.href = portalUrl;
+    } catch (error: any) {
+      if (error.message === 'UNAUTHORIZED') {
+        showAuthError();
+      } else {
+        console.error('Failed to open billing portal:', error);
+        showInlineError(error.message || 'Failed to open billing portal. Please try again.');
+      }
+    } finally {
+      if (manageSubscriptionBtn) (manageSubscriptionBtn as HTMLButtonElement).disabled = false;
+      textEl?.classList.remove('hidden');
+      loadingEl?.classList.add('hidden');
+    }
+  }
+
   // Initialize
   async function init(): Promise<void> {
     try {
@@ -841,6 +944,7 @@ import Layout from '../layouts/Layout.astro';
   // Event Listeners
   createKeyBtn?.addEventListener('click', handleCreateKey);
   copyKeyBtn?.addEventListener('click', handleCopyKey);
+  manageSubscriptionBtn?.addEventListener('click', handleManageSubscription);
 
   confirmSaved?.addEventListener('change', () => {
     if (closeModalBtn) closeModalBtn.disabled = !confirmSaved.checked;

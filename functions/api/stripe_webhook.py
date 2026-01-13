@@ -251,33 +251,49 @@ def _handle_checkout_completed(session: dict):
 
 
 def _handle_subscription_updated(subscription: dict):
-    """Handle subscription changes (upgrades/downgrades)."""
+    """Handle subscription changes (upgrades/downgrades) and cancellation pending state."""
     customer_id = subscription.get("customer")
     status = subscription.get("status")
+    cancel_at_period_end = subscription.get("cancel_at_period_end", False)
+    current_period_end = subscription.get("current_period_end")  # Unix timestamp
 
-    logger.info(f"Subscription updated for customer {customer_id}: {status}")
+    logger.info(
+        f"Subscription updated for customer {customer_id}: status={status}, "
+        f"cancel_at_period_end={cancel_at_period_end}"
+    )
 
     if status != "active":
         return
 
     # Get new tier from subscription items
     items = subscription.get("items", {}).get("data", [])
+    tier = None
     if items:
         price_id = items[0].get("price", {}).get("id")
         tier = PRICE_TO_TIER.get(price_id, "starter")
 
-        # Find user by customer_id and update tier
-        _update_user_tier_by_customer_id(customer_id, tier)
+    # Update user with tier and cancellation state
+    _update_user_subscription_state(
+        customer_id=customer_id,
+        tier=tier,
+        cancellation_pending=cancel_at_period_end,
+        cancellation_date=current_period_end if cancel_at_period_end else None,
+    )
 
 
 def _handle_subscription_deleted(subscription: dict):
-    """Handle subscription cancellation - downgrade to free."""
+    """Handle subscription cancellation - downgrade to free and clear cancellation state."""
     customer_id = subscription.get("customer")
 
     logger.info(f"Subscription deleted for customer {customer_id}")
 
-    # Downgrade to free tier
-    _update_user_tier_by_customer_id(customer_id, "free")
+    # Downgrade to free tier and clear cancellation pending state
+    _update_user_subscription_state(
+        customer_id=customer_id,
+        tier="free",
+        cancellation_pending=False,
+        cancellation_date=None,
+    )
 
 
 def _handle_payment_failed(invoice: dict):
@@ -472,3 +488,105 @@ def _update_user_tier_by_customer_id(customer_id: str, tier: str):
         )
 
     logger.info(f"Updated {len(items)} API keys for customer {customer_id} to tier {tier}")
+
+
+def _update_user_subscription_state(
+    customer_id: str,
+    tier: str | None = None,
+    cancellation_pending: bool = False,
+    cancellation_date: int | None = None,
+):
+    """Update user subscription state including tier and cancellation status.
+
+    Uses stripe-customer-index GSI to find user by Stripe customer ID.
+
+    Args:
+        customer_id: Stripe customer ID
+        tier: New tier name (if changing)
+        cancellation_pending: Whether subscription is set to cancel at period end
+        cancellation_date: Unix timestamp of when subscription will end (if canceling)
+    """
+    if not customer_id:
+        logger.error("Cannot update subscription state: no customer_id provided")
+        return
+
+    table = dynamodb.Table(API_KEYS_TABLE)
+
+    # Query GSI by stripe_customer_id
+    response = table.query(
+        IndexName="stripe-customer-index",
+        KeyConditionExpression=Key("stripe_customer_id").eq(customer_id),
+    )
+
+    items = response.get("Items", [])
+    if not items:
+        logger.warning(f"No user found for Stripe customer {customer_id}")
+        return
+
+    for item in items:
+        update_expr_parts = []
+        expr_values = {}
+
+        # Update tier if provided
+        if tier:
+            current_tier = item.get("tier", "free")
+            new_limit = TIER_LIMITS.get(tier, TIER_LIMITS["free"])
+            current_usage = item.get("requests_this_month", 0)
+
+            tier_order = {"free": 0, "starter": 1, "pro": 2, "business": 3}
+            is_upgrade = tier_order.get(tier, 0) > tier_order.get(current_tier, 0)
+
+            # Warn if downgrading and user is over new limit
+            if current_usage > new_limit and not is_upgrade:
+                logger.warning(
+                    f"User {item['pk']} downgraded to {tier} but has {current_usage} "
+                    f"requests (limit: {new_limit}). User is over limit until reset."
+                )
+
+            update_expr_parts.extend([
+                "tier = :tier",
+                "tier_updated_at = :now",
+                "payment_failures = :zero",
+                "monthly_limit = :limit",
+            ])
+            expr_values.update({
+                ":tier": tier,
+                ":now": datetime.now(timezone.utc).isoformat(),
+                ":zero": 0,
+                ":limit": new_limit,
+            })
+
+            # Reset usage on upgrade
+            if is_upgrade:
+                update_expr_parts.append("requests_this_month = :zero_usage")
+                expr_values[":zero_usage"] = 0
+                logger.info(f"Resetting usage for {item['pk']} on tier upgrade to {tier}")
+
+        # Update cancellation state
+        update_expr_parts.append("cancellation_pending = :cancel_pending")
+        expr_values[":cancel_pending"] = cancellation_pending
+
+        if cancellation_pending and cancellation_date:
+            update_expr_parts.append("cancellation_date = :cancel_date")
+            expr_values[":cancel_date"] = cancellation_date
+            logger.info(
+                f"User {item['pk']} subscription set to cancel at {cancellation_date}"
+            )
+        else:
+            # Clear cancellation date if not canceling
+            update_expr_parts.append("cancellation_date = :null_date")
+            expr_values[":null_date"] = None
+
+        if update_expr_parts:
+            update_expr = "SET " + ", ".join(update_expr_parts)
+            table.update_item(
+                Key={"pk": item["pk"], "sk": item["sk"]},
+                UpdateExpression=update_expr,
+                ExpressionAttributeValues=expr_values,
+            )
+
+    action = f"tier={tier}" if tier else "cancellation state"
+    logger.info(
+        f"Updated {len(items)} records for customer {customer_id}: {action}, "
+        f"cancellation_pending={cancellation_pending}"
+    )
