@@ -72,9 +72,11 @@ def handler(event, context):
                 continue
 
             key_hash = sk or ""
+            # Use stored key_suffix if available, fall back to hash suffix for old keys
+            key_suffix = item.get("key_suffix") or key_hash[-8:]
             api_keys.append({
                 "key_id": key_hash[:16],  # First 16 chars of hash as identifier
-                "key_prefix": f"pw_...{key_hash[-8:]}",  # Show suffix only
+                "key_prefix": f"pw_....{key_suffix}",  # Show actual key suffix
                 "tier": item.get("tier", "free"),
                 "requests_this_month": item.get("requests_this_month", 0),
                 "created_at": item.get("created_at"),

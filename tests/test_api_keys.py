@@ -490,3 +490,48 @@ class TestRevokeApiKeyHandler:
         result = handler(api_gateway_event, {})
 
         assert result["statusCode"] == 404
+
+    @mock_aws
+    def test_listed_key_suffix_matches_created_key(self, mock_dynamodb, api_gateway_event):
+        """The key suffix shown in the list should match the actual API key suffix."""
+        os.environ["API_KEYS_TABLE"] = "pkgwatch-api-keys"
+        os.environ["SESSION_SECRET_ARN"] = "test-secret"
+
+        secretsmanager = boto3.client("secretsmanager", region_name="us-east-1")
+        secretsmanager.create_secret(
+            Name="test-secret",
+            SecretString='{"secret": "test-secret-key-for-signing-sessions"}'
+        )
+
+        from api.create_api_key import handler as create_handler
+        from api.get_api_keys import handler as get_handler
+        import api.auth_callback
+        api.auth_callback._session_secret_cache = None
+
+        session_token = _create_test_session_token("user_suffix_test", "suffix@example.com", "pro")
+
+        # Create a new API key
+        api_gateway_event["httpMethod"] = "POST"
+        api_gateway_event["headers"]["Cookie"] = f"session={session_token}"
+
+        create_result = create_handler(api_gateway_event, {})
+        assert create_result["statusCode"] == 201
+        create_body = json.loads(create_result["body"])
+        created_api_key = create_body["api_key"]
+
+        # Get the last 8 chars of the actual API key
+        actual_suffix = created_api_key[-8:]
+
+        # List the keys
+        api_gateway_event["httpMethod"] = "GET"
+        get_result = get_handler(api_gateway_event, {})
+        assert get_result["statusCode"] == 200
+        get_body = json.loads(get_result["body"])
+
+        # Find the key in the list and verify suffix matches
+        assert len(get_body["api_keys"]) == 1
+        listed_key_prefix = get_body["api_keys"][0]["key_prefix"]
+
+        # The key_prefix should contain the actual key suffix, not the hash suffix
+        assert listed_key_prefix.endswith(actual_suffix), \
+            f"Listed key suffix '{listed_key_prefix}' should end with actual key suffix '{actual_suffix}'"

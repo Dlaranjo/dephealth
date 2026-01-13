@@ -113,6 +113,9 @@ def handler(event, context):
     # Generate new API key
     api_key = f"pw_{secrets.token_urlsafe(32)}"
     key_hash = hashlib.sha256(api_key.encode()).hexdigest()
+    # Store the last 8 chars of the actual key for display purposes
+    # (hash suffix is different, so we need to store the real suffix)
+    key_suffix = api_key[-8:]
     now = datetime.now(timezone.utc).isoformat()
 
     # Build DynamoDB item in low-level format for TransactWriteItems
@@ -120,6 +123,7 @@ def handler(event, context):
         "pk": {"S": user_id},
         "sk": {"S": key_hash},
         "key_hash": {"S": key_hash},
+        "key_suffix": {"S": key_suffix},
         "tier": {"S": tier},
         "created_at": {"S": now},
         "requests_this_month": {"N": "0"},
