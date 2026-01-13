@@ -112,8 +112,8 @@ export class ApiStack extends cdk.Stack {
       environment: {
         PACKAGES_TABLE: packagesTable.tableName,
         API_KEYS_TABLE: apiKeysTable.tableName,
-        STRIPE_SECRET_ARN: stripeSecret.secretArn,
-        STRIPE_WEBHOOK_SECRET_ARN: stripeWebhookSecret.secretArn,
+        STRIPE_SECRET_ARN: "pkgwatch/stripe-secret",  // Use name, not partial ARN
+        STRIPE_WEBHOOK_SECRET_ARN: "pkgwatch/stripe-webhook",  // Use name, not partial ARN
         ...(isDevMode && { ALLOW_DEV_CORS: "true" }), // Allow localhost CORS in dev
       },
     };
