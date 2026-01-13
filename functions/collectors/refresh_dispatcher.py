@@ -29,8 +29,11 @@ PACKAGE_QUEUE_URL = os.environ.get("PACKAGE_QUEUE_URL")
 JITTER_MAX_SECONDS = {
     1: int(os.environ.get("TIER1_JITTER_MAX", "300")),   # 5 minutes default
     2: int(os.environ.get("TIER2_JITTER_MAX", "600")),   # 10 minutes default
-    3: int(os.environ.get("TIER3_JITTER_MAX", "1800")),  # 30 minutes default
+    3: int(os.environ.get("TIER3_JITTER_MAX", "900")),   # 15 minutes max (SQS limit)
 }
+
+# SQS DelaySeconds maximum is 900 seconds (15 minutes)
+SQS_MAX_DELAY_SECONDS = 900
 
 
 def handler(event, context):
@@ -135,7 +138,8 @@ def handler(event, context):
                 continue
 
             # Add random jitter to spread load (tier-based)
-            jitter_max = JITTER_MAX_SECONDS.get(tier, 60)
+            # Cap at SQS maximum of 900 seconds
+            jitter_max = min(JITTER_MAX_SECONDS.get(tier, 60), SQS_MAX_DELAY_SECONDS)
             jitter = random.randint(0, jitter_max)
 
             entries.append({
