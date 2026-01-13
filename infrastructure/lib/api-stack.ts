@@ -238,6 +238,31 @@ export class ApiStack extends cdk.Stack {
       ],
     });
 
+    // Create checkout session handler
+    const createCheckoutHandler = new lambda.Function(
+      this,
+      "CreateCheckoutHandler",
+      {
+        ...commonLambdaProps,
+        functionName: "pkgwatch-api-create-checkout",
+        handler: "api.create_checkout.handler",
+        code: apiCodeWithShared,
+        description: "Create Stripe checkout session for upgrades",
+        environment: {
+          ...commonLambdaProps.environment,
+          STRIPE_PRICE_STARTER: process.env.STRIPE_PRICE_STARTER || "",
+          STRIPE_PRICE_PRO: process.env.STRIPE_PRICE_PRO || "",
+          STRIPE_PRICE_BUSINESS: process.env.STRIPE_PRICE_BUSINESS || "",
+          BASE_URL: "https://pkgwatch.laranjo.dev",
+          SESSION_SECRET_ARN: "pkgwatch/session-secret",
+        },
+      }
+    );
+
+    apiKeysTable.grantReadData(createCheckoutHandler);
+    stripeSecret.grantRead(createCheckoutHandler);
+    createCheckoutHandler.addToRolePolicy(sessionSecretPolicy);
+
     // Common props for auth handlers
     const authLambdaProps = {
       ...commonLambdaProps,
@@ -444,6 +469,9 @@ export class ApiStack extends cdk.Stack {
           "/scan/POST": {
             cachingEnabled: false,
           },
+          "/checkout/create/POST": {
+            cachingEnabled: false,
+          },
         },
       },
       defaultCorsPreflightOptions: {
@@ -539,11 +567,16 @@ export class ApiStack extends cdk.Stack {
           },
           dependencies: {
             type: apigateway.JsonSchemaType.OBJECT,
-            description: "Dependencies object from package.json",
+            description: "Dependencies object from package.json or requirements",
           },
           devDependencies: {
             type: apigateway.JsonSchemaType.OBJECT,
             description: "Dev dependencies object from package.json",
+          },
+          ecosystem: {
+            type: apigateway.JsonSchemaType.STRING,
+            description: "Package ecosystem: npm or pypi",
+            enum: ["npm", "pypi"],
           },
         },
         additionalProperties: false,
@@ -604,6 +637,24 @@ export class ApiStack extends cdk.Stack {
             format: "email",
             minLength: 5,
             maxLength: 254,
+          },
+        },
+        additionalProperties: false,
+      },
+    });
+
+    // Model for /checkout/create endpoint
+    const createCheckoutModel = new apigateway.Model(this, "CreateCheckoutModel", {
+      restApi: this.api,
+      contentType: "application/json",
+      modelName: "CreateCheckoutRequest",
+      schema: {
+        type: apigateway.JsonSchemaType.OBJECT,
+        required: ["tier"],
+        properties: {
+          tier: {
+            type: apigateway.JsonSchemaType.STRING,
+            enum: ["starter", "pro", "business"],
           },
         },
         additionalProperties: false,
@@ -688,6 +739,20 @@ export class ApiStack extends cdk.Stack {
     stripeWebhookResource.addMethod(
       "POST",
       new apigateway.LambdaIntegration(stripeWebhookHandler)
+    );
+
+    // POST /checkout/create (session auth)
+    const checkoutResource = this.api.root.addResource("checkout");
+    const createCheckoutResource = checkoutResource.addResource("create");
+    createCheckoutResource.addMethod(
+      "POST",
+      new apigateway.LambdaIntegration(createCheckoutHandler),
+      {
+        requestValidator: bodyValidator,
+        requestModels: {
+          "application/json": createCheckoutModel,
+        },
+      }
     );
 
     // ===========================================
@@ -977,6 +1042,7 @@ export class ApiStack extends cdk.Stack {
     createLambdaAlarms(scanHandler, "Scan");
     createLambdaAlarms(getUsageHandler, "GetUsage");
     createLambdaAlarms(stripeWebhookHandler, "StripeWebhook");
+    createLambdaAlarms(createCheckoutHandler, "CreateCheckout");
     createLambdaAlarms(resetUsageHandler, "ResetUsage");
 
     // Auth/signup Lambda alarms - critical for user access

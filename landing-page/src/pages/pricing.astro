@@ -16,25 +16,27 @@ const tiers = [
     cta: 'Get Started',
     ctaLink: '/signup',
     highlighted: false,
+    tier: null,
   },
   {
     name: 'Starter',
-    price: 'TBD',
-    period: '',
+    price: '$9',
+    period: '/month',
     description: 'For individual developers',
     features: [
       '25,000 requests/month',
       'Everything in Free',
       'Email support',
     ],
-    cta: 'Coming Soon',
-    ctaLink: '#',
+    cta: 'Upgrade',
+    ctaLink: null,
     highlighted: false,
+    tier: 'starter',
   },
   {
     name: 'Pro',
-    price: 'TBD',
-    period: '',
+    price: '$29',
+    period: '/month',
     description: 'For teams with growing needs',
     features: [
       '100,000 requests/month',
@@ -42,14 +44,15 @@ const tiers = [
       'Priority API access',
       'Usage analytics',
     ],
-    cta: 'Coming Soon',
-    ctaLink: '#',
+    cta: 'Upgrade',
+    ctaLink: null,
     highlighted: true,
+    tier: 'pro',
   },
   {
     name: 'Business',
-    price: 'TBD',
-    period: '',
+    price: '$99',
+    period: '/month',
     description: 'For organizations at scale',
     features: [
       '500,000 requests/month',
@@ -58,9 +61,10 @@ const tiers = [
       'Dedicated support',
       'Custom integrations',
     ],
-    cta: 'Coming Soon',
-    ctaLink: '#',
+    cta: 'Upgrade',
+    ctaLink: null,
     highlighted: false,
+    tier: 'business',
   },
 ];
 ---
@@ -102,17 +106,29 @@ const tiers = [
             ))}
           </ul>
 
-          <a
-            href={tier.ctaLink}
-            class={`block w-full text-center px-6 py-3 rounded-lg font-semibold transition ${
-              tier.highlighted
-                ? 'btn-gradient text-white'
-                : 'bg-zinc-800 text-white hover:bg-zinc-700'
-            } ${tier.cta === 'Coming Soon' ? 'opacity-50 cursor-not-allowed pointer-events-none' : ''}`}
-            aria-disabled={tier.cta === 'Coming Soon' ? 'true' : undefined}
-          >
-            {tier.cta}
-          </a>
+          {tier.tier ? (
+            <button
+              data-tier={tier.tier}
+              class={`block w-full text-center px-6 py-3 rounded-lg font-semibold transition cursor-pointer ${
+                tier.highlighted
+                  ? 'btn-gradient text-white'
+                  : 'bg-zinc-800 text-white hover:bg-zinc-700'
+              }`}
+            >
+              {tier.cta}
+            </button>
+          ) : (
+            <a
+              href={tier.ctaLink}
+              class={`block w-full text-center px-6 py-3 rounded-lg font-semibold transition ${
+                tier.highlighted
+                  ? 'btn-gradient text-white'
+                  : 'bg-zinc-800 text-white hover:bg-zinc-700'
+              }`}
+            >
+              {tier.cta}
+            </a>
+          )}
         </div>
       ))}
     </div>
@@ -162,3 +178,100 @@ const tiers = [
       </div>
     </div>
 </Layout>
+
+<script>
+  const API_BASE = 'https://api.pkgwatch.laranjo.dev';
+
+  const TIER_ORDER: Record<string, number> = { free: 0, starter: 1, pro: 2, business: 3 };
+
+  function tierOrder(tier: string | null): number {
+    return TIER_ORDER[tier || 'free'] || 0;
+  }
+
+  // Check if user is logged in and get their tier
+  async function checkAuth(): Promise<{ tier: string; email: string } | null> {
+    try {
+      const response = await fetch(`${API_BASE}/auth/me`, {
+        credentials: 'include',
+      });
+      if (response.ok) {
+        return await response.json();
+      }
+    } catch (e) {
+      console.error('Auth check failed:', e);
+    }
+    return null;
+  }
+
+  // Create checkout session and redirect
+  async function startCheckout(tier: string, button: HTMLButtonElement) {
+    const originalText = button.textContent;
+    button.disabled = true;
+    button.textContent = 'Loading...';
+
+    try {
+      const response = await fetch(`${API_BASE}/checkout/create`, {
+        method: 'POST',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ tier }),
+      });
+
+      const data = await response.json();
+
+      if (response.ok && data.checkout_url) {
+        // Redirect to Stripe Checkout
+        window.location.href = data.checkout_url;
+      } else if (response.status === 401) {
+        // Not logged in - redirect to login with return URL
+        window.location.href = `/login?redirect=${encodeURIComponent('/pricing')}`;
+      } else {
+        alert(data.error?.message || 'Failed to start checkout');
+        button.disabled = false;
+        button.textContent = originalText;
+      }
+    } catch (error) {
+      console.error('Checkout error:', error);
+      alert('Network error. Please try again.');
+      button.disabled = false;
+      button.textContent = originalText;
+    }
+  }
+
+  // Initialize on page load
+  async function init() {
+    const user = await checkAuth();
+    const currentTier = user?.tier || null;
+
+    // Update buttons based on auth state and current tier
+    document.querySelectorAll<HTMLButtonElement>('[data-tier]').forEach((button) => {
+      const tier = button.dataset.tier;
+      if (!tier) return;
+
+      if (currentTier === tier) {
+        button.textContent = 'Current Plan';
+        button.disabled = true;
+        button.classList.add('opacity-50', 'cursor-not-allowed');
+        button.classList.remove('cursor-pointer');
+      } else if (user && tierOrder(tier) < tierOrder(currentTier)) {
+        // User is on a higher tier - show disabled downgrade
+        button.textContent = 'Current: ' + (currentTier?.charAt(0).toUpperCase() + currentTier?.slice(1));
+        button.disabled = true;
+        button.classList.add('opacity-50', 'cursor-not-allowed');
+        button.classList.remove('cursor-pointer');
+      } else {
+        // Available for upgrade
+        button.addEventListener('click', () => startCheckout(tier, button));
+      }
+    });
+  }
+
+  // Handle URL parameters for feedback
+  const params = new URLSearchParams(window.location.search);
+  if (params.get('cancelled') === 'true') {
+    // Could show a toast/notification here if desired
+    console.log('Checkout was cancelled');
+  }
+
+  init();
+</script>
