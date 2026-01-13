@@ -66,6 +66,15 @@ export class ApiStack extends cdk.Stack {
       "pkgwatch/stripe-webhook"
     );
 
+    // Explicit policy for Stripe secret access (fromSecretNameV2 grants don't work with suffixed ARNs)
+    const stripeSecretPolicy = new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: ["secretsmanager:GetSecretValue"],
+      resources: [
+        `arn:aws:secretsmanager:${this.region}:${this.account}:secret:pkgwatch/stripe-secret*`,
+      ],
+    });
+
     // ===========================================
     // Lambda: Common configuration
     // ===========================================
@@ -260,7 +269,7 @@ export class ApiStack extends cdk.Stack {
     );
 
     apiKeysTable.grantReadData(createCheckoutHandler);
-    stripeSecret.grantRead(createCheckoutHandler);
+    createCheckoutHandler.addToRolePolicy(stripeSecretPolicy);
     createCheckoutHandler.addToRolePolicy(sessionSecretPolicy);
 
     // Common props for auth handlers
