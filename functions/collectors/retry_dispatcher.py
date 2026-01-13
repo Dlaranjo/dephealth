@@ -51,6 +51,9 @@ def handler(event, context):
     packages = []
 
     # Query GSI for each incomplete status (more efficient than Scan)
+    # Note: We intentionally don't paginate here to limit throughput and prevent
+    # overwhelming external APIs. Older incomplete packages will be picked up
+    # in subsequent runs as newer ones are processed.
     for status in ["partial", "minimal"]:
         try:
             response = table.query(

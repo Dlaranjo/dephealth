@@ -787,8 +787,12 @@ async def process_single_package(message: dict) -> tuple[bool, str, Optional[str
 
         # Pass existing retry_count to store_package_data for retry tracking
         # (used to calculate next_retry_at if collection is still incomplete)
+        # Note: If this is a retry, we already incremented retry_count in DynamoDB above,
+        # so we need to pass the incremented value to avoid overwriting it
         if existing:
-            data["_existing_retry_count"] = existing.get("retry_count", 0)
+            base_retry_count = existing.get("retry_count", 0)
+            # If this is a retry, the count was already incremented in DynamoDB
+            data["_existing_retry_count"] = base_retry_count + 1 if is_retry else base_retry_count
 
         # Store raw data in S3 for debugging
         store_raw_data(ecosystem, name, data)
