@@ -63,8 +63,16 @@ const { formId = 'YOUR_FORM_ID' } = Astro.props
     </div>
   </div>
 
-  <!-- Try first option -->
+  <!-- Methodology proof -->
   <div class="mt-8 pt-6 border-t border-[#1a1a1f]">
+    <p class="text-sm text-zinc-400">
+      <span class="text-white font-semibold">0.846</span> prediction accuracy, validated with
+      <a href="/methodology" class="text-blue-400 hover:text-blue-300 transition-colors">academic survival analysis methodology</a>.
+    </p>
+  </div>
+
+  <!-- Try first option -->
+  <div class="mt-6 pt-6 border-t border-[#1a1a1f]">
     <p class="text-sm text-zinc-500 mb-3">Want to try first? The CLI works without an API key:</p>
     <code class="inline-block bg-[#111113] border border-[#1a1a1f] px-4 py-2 rounded-lg text-sm font-mono text-green-400">
       npx @pkgwatch/cli check express
