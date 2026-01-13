@@ -68,6 +68,15 @@ export class StorageStack extends cdk.Stack {
       projectionType: dynamodb.ProjectionType.KEYS_ONLY,
     });
 
+    // GSI for querying packages by data completeness status
+    // Used by retry_dispatcher.py to find incomplete packages due for retry
+    this.packagesTable.addGlobalSecondaryIndex({
+      indexName: "data-status-index",
+      partitionKey: { name: "data_status", type: dynamodb.AttributeType.STRING },
+      sortKey: { name: "next_retry_at", type: dynamodb.AttributeType.STRING },
+      projectionType: dynamodb.ProjectionType.KEYS_ONLY,
+    });
+
     // ===========================================
     // DynamoDB: API Keys Table
     // ===========================================

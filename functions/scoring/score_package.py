@@ -262,6 +262,7 @@ def _score_single_package(event: dict) -> dict:
                     confidence_interval = :ci,
                     abandonment_risk = :ar,
                     scored_at = :now
+                REMOVE force_rescore
             """,
             ExpressionAttributeValues={
                 ":hs": to_decimal(health_result["health_score"]),
@@ -344,12 +345,16 @@ def _process_stream_batch(event: dict) -> dict:
                 new_collected_at = new_image.get("collected_at", {}).get("S")
                 old_collected_at = old_image.get("collected_at", {}).get("S") if old_image else None
 
-                # Skip if collected_at hasn't changed (this is a score update, not collection)
+                # Check for force_rescore flag (allows manual data updates to trigger rescoring)
+                force_rescore = new_image.get("force_rescore", {}).get("BOOL", False)
+
+                # Skip if collected_at hasn't changed AND not force_rescore
                 # IMPORTANT: Must check new_collected_at is not None to avoid None == None being True
-                if event_name == "MODIFY" and new_collected_at and new_collected_at == old_collected_at:
-                    logger.debug("Skipping - collected_at unchanged (likely score update)")
-                    skipped += 1
-                    continue
+                if event_name == "MODIFY" and not force_rescore:
+                    if new_collected_at and new_collected_at == old_collected_at:
+                        logger.debug("Skipping - collected_at unchanged (likely score update)")
+                        skipped += 1
+                        continue
 
                 # Extract ecosystem and name from pk
                 pk = new_image.get("pk", {}).get("S", "")

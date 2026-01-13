@@ -732,17 +732,20 @@ export class ApiStack extends cdk.Stack {
     packageNameResource.addMethod(
       "GET",
       new apigateway.LambdaIntegration(getPackageHandler, {
-        // Include path parameters in cache key so different packages get different cache entries
+        // Include path parameters and Origin header in cache key
+        // Origin is required so CORS headers are cached correctly per origin
         cacheKeyParameters: [
           "method.request.path.ecosystem",
           "method.request.path.name",
+          "method.request.header.Origin",
         ],
       }),
       {
-        // Map path parameters for cache key
+        // Map path parameters and Origin header for cache key
         requestParameters: {
           "method.request.path.ecosystem": true,
           "method.request.path.name": true,
+          "method.request.header.Origin": false, // false = optional (not required)
         },
       }
     );

@@ -341,6 +341,31 @@ export class PipelineStack extends cdk.Stack {
     });
 
     // ===========================================
+    // Lambda: Retry Dispatcher (for incomplete data)
+    // ===========================================
+    // Finds packages with incomplete data and re-queues them for collection
+    const retryDispatcher = new lambda.Function(this, "RetryDispatcher", {
+      ...commonLambdaProps,
+      functionName: "pkgwatch-retry-dispatcher",
+      handler: "retry_dispatcher.handler",
+      code: collectorsCode,
+      timeout: cdk.Duration.minutes(2),
+      description: "Dispatches retry jobs for packages with incomplete data",
+    });
+
+    // Grant permissions
+    packagesTable.grantReadWriteData(retryDispatcher); // Read for query, write for retry_dispatched_at
+    packageQueue.grantSendMessages(retryDispatcher);
+
+    // Schedule retry dispatcher every 30 minutes
+    new events.Rule(this, "RetryDispatcherSchedule", {
+      ruleName: "pkgwatch-retry-dispatcher",
+      schedule: events.Schedule.rate(cdk.Duration.minutes(30)),
+      description: "Triggers retry dispatcher for incomplete packages",
+      targets: [new targets.LambdaFunction(retryDispatcher)],
+    });
+
+    // ===========================================
     // CloudWatch Alarms & Monitoring
     // ===========================================
 
@@ -420,6 +445,31 @@ export class PipelineStack extends cdk.Stack {
     );
     collectorErrorAlarm.addAlarmAction(new cloudwatchActions.SnsAction(this.alertTopic));
     collectorErrorAlarm.addOkAction(new cloudwatchActions.SnsAction(this.alertTopic));
+
+    // 3b. Retry Dispatcher Error Alarm
+    const retryDispatcherErrorAlarm = new cloudwatch.Alarm(
+      this,
+      "RetryDispatcherErrorAlarm",
+      {
+        alarmName: "pkgwatch-retry-dispatcher-errors",
+        alarmDescription:
+          "Retry dispatcher failing - incomplete packages not being retried",
+        metric: retryDispatcher.metricErrors({
+          period: cdk.Duration.minutes(5),
+        }),
+        threshold: 1,
+        evaluationPeriods: 2,
+        comparisonOperator:
+          cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+        treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+      }
+    );
+    retryDispatcherErrorAlarm.addAlarmAction(
+      new cloudwatchActions.SnsAction(this.alertTopic)
+    );
+    retryDispatcherErrorAlarm.addOkAction(
+      new cloudwatchActions.SnsAction(this.alertTopic)
+    );
 
     // 4. Score Calculator Error Rate
     const scoreErrorAlarm = new cloudwatch.Alarm(this, "ScoreErrorAlarm", {

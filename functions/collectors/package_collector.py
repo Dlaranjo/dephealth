@@ -15,7 +15,7 @@ import os
 import random
 import re
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Optional, Tuple
 
 import boto3
@@ -587,6 +587,59 @@ def store_raw_data(ecosystem: str, name: str, data: dict):
         logger.warning(f"Failed to store raw data: {e}")
 
 
+# Maximum retry count for incomplete data collection
+MAX_RETRY_COUNT = 5
+
+
+def _calculate_data_status(data: dict, ecosystem: str) -> tuple[str, list]:
+    """
+    Calculate data completeness status based on which sources succeeded or failed.
+
+    Returns:
+        Tuple of (status, missing_sources) where:
+        - status is "complete", "partial", or "minimal"
+        - missing_sources is a list of sources that failed
+    """
+    missing = []
+
+    if data.get("depsdev_error"):
+        missing.append("deps.dev")
+
+    if ecosystem == "npm":
+        if data.get("npm_error"):
+            missing.append("npm")
+        if data.get("bundlephobia_error"):
+            missing.append("bundlephobia")
+    elif ecosystem == "pypi":
+        if data.get("pypi_error"):
+            missing.append("pypi")
+
+    # GitHub is only expected if we have a repository_url
+    if data.get("repository_url") and data.get("github_error"):
+        missing.append("github")
+
+    if not missing:
+        return ("complete", [])
+    elif "deps.dev" in missing:
+        return ("minimal", missing)
+    return ("partial", missing)
+
+
+def _calculate_next_retry_at(retry_count: int) -> str | None:
+    """
+    Calculate next retry time with exponential backoff.
+
+    Backoff schedule: 1hr, 2hr, 4hr, 8hr, 24hr
+    Returns None if retry_count >= MAX_RETRY_COUNT.
+    """
+    if retry_count >= MAX_RETRY_COUNT:
+        return None
+
+    delays_hours = [1, 2, 4, 8, 24]
+    delay = delays_hours[min(retry_count, len(delays_hours) - 1)]
+    return (datetime.now(timezone.utc) + timedelta(hours=delay)).isoformat()
+
+
 def store_package_data(ecosystem: str, name: str, data: dict, tier: int):
     """Store processed package data in DynamoDB."""
     table = dynamodb.Table(PACKAGES_TABLE)
@@ -646,14 +699,32 @@ def store_package_data(ecosystem: str, name: str, data: dict, tier: int):
         "sources": data.get("sources", []),
         "data_freshness": data.get("data_freshness", "fresh"),
         "stale_reason": data.get("stale_reason"),
+        # Collection timestamp (used by score_package.py for loop prevention)
+        "collected_at": data.get("collected_at"),
     }
+
+    # Calculate data completeness status for retry tracking
+    data_status, missing_sources = _calculate_data_status(data, ecosystem)
+    item["data_status"] = data_status
+    item["missing_sources"] = missing_sources
+
+    # Handle retry tracking based on data completeness
+    if data_status == "complete":
+        # Reset retry tracking on successful complete collection
+        item["retry_count"] = 0
+        # Don't set next_retry_at - will be removed by None filter below
+    else:
+        # Get existing retry_count (don't increment here - done in process_single_package for retries)
+        existing_retry = data.get("_existing_retry_count", 0)
+        item["retry_count"] = existing_retry
+        item["next_retry_at"] = _calculate_next_retry_at(existing_retry)
 
     # Remove None values and empty strings (DynamoDB rejects both by default)
     item = {k: v for k, v in item.items() if v is not None and v != ""}
 
     try:
         table.put_item(Item=item)
-        logger.info(f"Stored package data: {ecosystem}/{name}")
+        logger.info(f"Stored package data: {ecosystem}/{name} (status: {data_status})")
     except Exception as e:
         logger.error(f"Failed to store package data: {e}")
         raise
@@ -674,10 +745,28 @@ async def process_single_package(message: dict) -> tuple[bool, str, Optional[str
     ecosystem = message["ecosystem"]
     name = message["name"]
     tier = message.get("tier", 3)
+    force_refresh = message.get("force_refresh", False)
+    is_retry = message.get("reason") == "incomplete_data_retry"
 
-    # Check if recently collected (deduplication)
+    # Get existing package data
     existing = await _get_existing_package_data(ecosystem, name)
-    if existing:
+
+    # For incomplete data retries, increment retry_count BEFORE collection
+    # This prevents infinite loops if the Lambda crashes before storing
+    if is_retry and existing:
+        table = dynamodb.Table(PACKAGES_TABLE)
+        try:
+            table.update_item(
+                Key={"pk": f"{ecosystem}#{name}", "sk": "LATEST"},
+                UpdateExpression="SET retry_count = if_not_exists(retry_count, :zero) + :one",
+                ExpressionAttributeValues={":zero": 0, ":one": 1},
+            )
+            logger.debug(f"Incremented retry_count for {ecosystem}/{name}")
+        except Exception as e:
+            logger.warning(f"Failed to increment retry_count: {e}")
+
+    # Check if recently collected (deduplication) - skip if force_refresh
+    if not force_refresh and existing:
         last_updated = existing.get("last_updated")
         if last_updated:
             try:
@@ -690,11 +779,16 @@ async def process_single_package(message: dict) -> tuple[bool, str, Optional[str
             except Exception as e:
                 logger.debug(f"Failed to parse last_updated: {e}")
 
-    logger.info(f"Collecting data for {ecosystem}/{name} (tier {tier})")
+    logger.info(f"Collecting data for {ecosystem}/{name} (tier {tier}, force={force_refresh})")
 
     try:
         # Collect data from all sources
         data = await collect_package_data(ecosystem, name)
+
+        # Pass existing retry_count to store_package_data for retry tracking
+        # (used to calculate next_retry_at if collection is still incomplete)
+        if existing:
+            data["_existing_retry_count"] = existing.get("retry_count", 0)
 
         # Store raw data in S3 for debugging
         store_raw_data(ecosystem, name, data)
