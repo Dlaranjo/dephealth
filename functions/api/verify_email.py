@@ -2,12 +2,13 @@
 Verify Email Endpoint - GET /verify?token=xxx
 
 Verifies email and activates the user account with an API key.
+Creates a session so user can immediately access their dashboard.
 """
 
 import logging
 import os
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from urllib.parse import urlencode
 
 import boto3
@@ -19,6 +20,9 @@ logger.setLevel(logging.INFO)
 
 # Import API key generation from shared module
 from shared.auth import generate_api_key
+
+# Import session creation from auth_callback
+from api.auth_callback import _create_session_token, _get_session_secret, SESSION_TTL_DAYS
 
 dynamodb = boto3.resource("dynamodb")
 API_KEYS_TABLE = os.environ.get("API_KEYS_TABLE", "pkgwatch-api-keys")
@@ -155,15 +159,36 @@ def handler(event, context):
         logger.error(f"Failed to store pending key display: {e}")
         # Continue anyway - user can still see key in dashboard list
 
+    # Create session so user can access dashboard and retrieve their API key
+    session_secret = _get_session_secret()
+    if session_secret:
+        session_expires = now + timedelta(days=SESSION_TTL_DAYS)
+        session_data = {
+            "user_id": user_id,
+            "email": email,
+            "tier": "free",  # New users always start on free tier
+            "exp": int(session_expires.timestamp()),
+        }
+        session_token = _create_session_token(session_data, session_secret)
+        cookie_value = f"session={session_token}; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age={SESSION_TTL_DAYS * 86400}"
+    else:
+        cookie_value = None
+        logger.warning("Could not create session - SESSION_SECRET_ARN not configured")
+
+    headers = {
+        "Location": f"{BASE_URL}/dashboard?verified=true",
+        "Cache-Control": "no-store",
+        # Security headers to mitigate XSS during redirect
+        "Content-Security-Policy": "default-src 'none'",
+        "X-Content-Type-Options": "nosniff",
+    }
+
+    if cookie_value:
+        headers["Set-Cookie"] = cookie_value
+
     return {
         "statusCode": 302,
-        "headers": {
-            "Location": f"{BASE_URL}/dashboard?verified=true",
-            "Cache-Control": "no-store",
-            # Security headers to mitigate XSS during redirect
-            "Content-Security-Policy": "default-src 'none'",
-            "X-Content-Type-Options": "nosniff",
-        },
+        "headers": headers,
         "body": "",
     }
 

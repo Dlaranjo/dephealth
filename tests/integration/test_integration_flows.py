@@ -328,16 +328,19 @@ class TestNewUserSignupFlow:
         location = result["headers"]["Location"]
         assert "dashboard" in location
         assert "verified=true" in location
-        # API key is now passed in a secure cookie (not URL) to prevent exposure in logs/history
+        # Session cookie is set so user can access dashboard and retrieve their API key
         assert "Set-Cookie" in result["headers"]
         cookie = result["headers"]["Set-Cookie"]
-        assert "new_api_key=pw_" in cookie
+        assert "session=" in cookie
+        assert "HttpOnly" in cookie
+        assert "Secure" in cookie
 
-        # Extract the API key from the cookie header
-        import re
-        cookie_match = re.search(r"new_api_key=(pw_[^;]+)", cookie)
-        assert cookie_match is not None
-        api_key = cookie_match.group(1)
+        # API key is stored in PENDING_DISPLAY for one-time retrieval
+        pending_display = table.get_item(
+            Key={"pk": pending_user["pk"], "sk": "PENDING_DISPLAY"}
+        )
+        assert "Item" in pending_display
+        api_key = pending_display["Item"]["api_key"]
         assert api_key.startswith("pw_")
 
         # Verify PENDING record was deleted

@@ -64,11 +64,11 @@ def handler(event, context):
         )
         items = response.get("Items", [])
 
-        # Filter out pending signups, user metadata, and format response
+        # Filter out pending signups, user metadata, pending display records, and format response
         api_keys = []
         for item in items:
             sk = item.get("sk")
-            if sk == "PENDING" or sk == "USER_META":
+            if sk in ("PENDING", "USER_META", "PENDING_DISPLAY"):
                 continue
 
             key_hash = sk or ""

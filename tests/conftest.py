@@ -153,7 +153,7 @@ def mock_dynamodb():
                     "Projection": {"ProjectionType": "ALL"},
                 },
                 {
-                    "IndexName": "data-status-index",
+                    "IndexName": "data-status-index-v2",
                     "KeySchema": [
                         {"AttributeName": "data_status", "KeyType": "HASH"},
                         {"AttributeName": "next_retry_at", "KeyType": "RANGE"},
