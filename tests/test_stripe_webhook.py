@@ -5,6 +5,7 @@ Tests for Stripe webhook handler.
 import hashlib
 import json
 import os
+from datetime import datetime, timezone, timedelta
 
 import pytest
 from moto import mock_aws
@@ -213,13 +214,15 @@ class TestHandlePaymentFailed:
     """Tests for _handle_payment_failed function."""
 
     @mock_aws
-    def test_downgrades_after_three_failures(self, mock_dynamodb):
-        """Should downgrade to free after 3 failed payments."""
+    def test_downgrades_after_grace_period_and_three_failures(self, mock_dynamodb):
+        """Should downgrade to free after 3 failed payments AND grace period expired."""
         os.environ["API_KEYS_TABLE"] = "pkgwatch-api-keys"
 
         table = mock_dynamodb.Table("pkgwatch-api-keys")
 
         key_hash = hashlib.sha256(b"pw_failing").hexdigest()
+        # Set first_payment_failure_at to 10 days ago (past the 7-day grace period)
+        ten_days_ago = (datetime.now(timezone.utc) - timedelta(days=10)).isoformat()
         table.put_item(
             Item={
                 "pk": "user_failing",
@@ -229,6 +232,8 @@ class TestHandlePaymentFailed:
                 "tier": "pro",
                 "stripe_customer_id": "cus_failing",
                 "email_verified": True,
+                "first_payment_failure_at": ten_days_ago,  # Grace period already started
+                "payment_failures": 2,  # Previous failures
             }
         )
 
@@ -246,6 +251,88 @@ class TestHandlePaymentFailed:
         item = response.get("Item")
         assert item["tier"] == "free"
         assert item["payment_failures"] == 3
+        # Grace period state should be cleared on downgrade
+        assert "first_payment_failure_at" not in item
+
+    @mock_aws
+    def test_no_downgrade_within_grace_period(self, mock_dynamodb):
+        """Should NOT downgrade if still within 7-day grace period, even with 3 failures."""
+        os.environ["API_KEYS_TABLE"] = "pkgwatch-api-keys"
+
+        table = mock_dynamodb.Table("pkgwatch-api-keys")
+
+        key_hash = hashlib.sha256(b"pw_grace").hexdigest()
+        # Set first_payment_failure_at to 3 days ago (within grace period)
+        three_days_ago = (datetime.now(timezone.utc) - timedelta(days=3)).isoformat()
+        table.put_item(
+            Item={
+                "pk": "user_grace",
+                "sk": key_hash,
+                "key_hash": key_hash,
+                "email": "grace@example.com",
+                "tier": "pro",
+                "stripe_customer_id": "cus_grace",
+                "email_verified": True,
+                "first_payment_failure_at": three_days_ago,
+                "payment_failures": 2,
+            }
+        )
+
+        from api.stripe_webhook import _handle_payment_failed
+
+        invoice = {
+            "customer": "cus_grace",
+            "customer_email": "grace@example.com",
+            "attempt_count": 3,
+        }
+
+        _handle_payment_failed(invoice)
+
+        response = table.get_item(Key={"pk": "user_grace", "sk": key_hash})
+        item = response.get("Item")
+        # Should still be pro tier - within grace period
+        assert item["tier"] == "pro"
+        assert item["payment_failures"] == 3
+        # Grace period state should be preserved
+        assert item["first_payment_failure_at"] == three_days_ago
+
+    @mock_aws
+    def test_first_failure_starts_grace_period(self, mock_dynamodb):
+        """First payment failure should start the grace period."""
+        os.environ["API_KEYS_TABLE"] = "pkgwatch-api-keys"
+
+        table = mock_dynamodb.Table("pkgwatch-api-keys")
+
+        key_hash = hashlib.sha256(b"pw_first").hexdigest()
+        table.put_item(
+            Item={
+                "pk": "user_first",
+                "sk": key_hash,
+                "key_hash": key_hash,
+                "email": "first@example.com",
+                "tier": "pro",
+                "stripe_customer_id": "cus_first",
+                "email_verified": True,
+            }
+        )
+
+        from api.stripe_webhook import _handle_payment_failed
+
+        invoice = {
+            "customer": "cus_first",
+            "customer_email": "first@example.com",
+            "attempt_count": 1,
+        }
+
+        _handle_payment_failed(invoice)
+
+        response = table.get_item(Key={"pk": "user_first", "sk": key_hash})
+        item = response.get("Item")
+        # Should still be pro tier - first failure
+        assert item["tier"] == "pro"
+        assert item["payment_failures"] == 1
+        # Grace period should be started
+        assert "first_payment_failure_at" in item
 
     @mock_aws
     def test_tracks_failure_count_under_three(self, mock_dynamodb):

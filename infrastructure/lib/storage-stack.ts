@@ -7,6 +7,7 @@ import { Construct } from "constructs";
 export class StorageStack extends cdk.Stack {
   public readonly packagesTable: dynamodb.Table;
   public readonly apiKeysTable: dynamodb.Table;
+  public readonly billingEventsTable: dynamodb.Table;
   public readonly rawDataBucket: s3.Bucket;
   public readonly accessLogsBucket: s3.Bucket;
   public readonly publicDataBucket: s3.Bucket;
@@ -172,6 +173,41 @@ export class StorageStack extends cdk.Stack {
     });
 
     // ===========================================
+    // DynamoDB: Billing Events Table
+    // ===========================================
+    // Audit table for Stripe webhook deduplication and dispute investigation
+    // PK: event_id (Stripe's unique ID) - ensures reliable deduplication
+    // SK: event_type
+    // GSI: customer-index for querying events by Stripe customer
+    this.billingEventsTable = new dynamodb.Table(this, "BillingEventsTable", {
+      tableName: "pkgwatch-billing-events",
+      partitionKey: { name: "pk", type: dynamodb.AttributeType.STRING },
+      sortKey: { name: "sk", type: dynamodb.AttributeType.STRING },
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      pointInTimeRecoverySpecification: {
+        pointInTimeRecoveryEnabled: true,
+      },
+      encryption: dynamodb.TableEncryption.AWS_MANAGED,
+      removalPolicy: cdk.RemovalPolicy.RETAIN,
+      timeToLiveAttribute: "ttl", // Auto-expire events after 90 days
+    });
+
+    // GSI for querying events by Stripe customer ID
+    // Useful for investigating billing issues and disputes
+    this.billingEventsTable.addGlobalSecondaryIndex({
+      indexName: "customer-index",
+      partitionKey: {
+        name: "customer_id",
+        type: dynamodb.AttributeType.STRING,
+      },
+      sortKey: {
+        name: "processed_at",
+        type: dynamodb.AttributeType.STRING,
+      },
+      projectionType: dynamodb.ProjectionType.ALL,
+    });
+
+    // ===========================================
     // S3: Raw Data Bucket
     // ===========================================
     // Stores raw API responses for debugging and reprocessing
@@ -233,6 +269,12 @@ export class StorageStack extends cdk.Stack {
       value: this.apiKeysTable.tableName,
       description: "DynamoDB API keys table name",
       exportName: "PkgWatchApiKeysTable",
+    });
+
+    new cdk.CfnOutput(this, "BillingEventsTableName", {
+      value: this.billingEventsTable.tableName,
+      description: "DynamoDB billing events table name",
+      exportName: "PkgWatchBillingEventsTable",
     });
 
     new cdk.CfnOutput(this, "RawDataBucketName", {

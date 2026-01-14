@@ -44,6 +44,7 @@ const apiStack = new ApiStack(app, "PkgWatchApi", {
   description: "PkgWatch REST API",
   packagesTable: storageStack.packagesTable,
   apiKeysTable: storageStack.apiKeysTable,
+  billingEventsTable: storageStack.billingEventsTable,
   alertTopic: pipelineStack.alertTopic,
   packageQueue: pipelineStack.packageQueue, // For package request API endpoint
 });

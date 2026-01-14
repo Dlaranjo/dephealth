@@ -17,13 +17,32 @@ import logging
 import os
 from datetime import datetime, timezone
 
-import boto3
+from botocore.exceptions import ClientError
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
-dynamodb = boto3.resource("dynamodb")
-sqs = boto3.client("sqs")
+# Lazy initialization to reduce cold start overhead
+_dynamodb = None
+_sqs = None
+
+
+def _get_dynamodb():
+    """Get DynamoDB resource, creating it lazily on first use."""
+    global _dynamodb
+    if _dynamodb is None:
+        import boto3
+        _dynamodb = boto3.resource("dynamodb")
+    return _dynamodb
+
+
+def _get_sqs():
+    """Get SQS client, creating it lazily on first use."""
+    global _sqs
+    if _sqs is None:
+        import boto3
+        _sqs = boto3.client("sqs")
+    return _sqs
 
 PACKAGES_TABLE = os.environ.get("PACKAGES_TABLE", "pkgwatch-packages")
 API_KEYS_TABLE = os.environ.get("API_KEYS_TABLE", "pkgwatch-api-keys")
@@ -60,7 +79,7 @@ def handler(event, context):
             f"Rate limit exceeded. Maximum {RATE_LIMIT_PER_DAY} requests per day.",
         )
 
-    table = dynamodb.Table(PACKAGES_TABLE)
+    table = _get_dynamodb().Table(PACKAGES_TABLE)
 
     # Check if package already exists
     try:
@@ -107,16 +126,18 @@ def handler(event, context):
             },
             ConditionExpression="attribute_not_exists(pk)",
         )
-    except dynamodb.meta.client.exceptions.ConditionalCheckFailedException:
-        # Race condition - already added
-        return success_response(
-            {
-                "status": "exists",
-                "package": name,
-                "ecosystem": ecosystem,
-                "message": "Package was just added by another request",
-            }
-        )
+    except ClientError as e:
+        if e.response["Error"]["Code"] == "ConditionalCheckFailedException":
+            # Race condition - already added
+            return success_response(
+                {
+                    "status": "exists",
+                    "package": name,
+                    "ecosystem": ecosystem,
+                    "message": "Package was just added by another request",
+                }
+            )
+        raise  # Re-raise other ClientErrors
     except Exception as e:
         logger.error(f"Failed to add package: {e}")
         return error_response(500, "db_error", "Failed to add package")
@@ -124,7 +145,7 @@ def handler(event, context):
     # Queue for immediate collection
     if PACKAGE_QUEUE_URL:
         try:
-            sqs.send_message(
+            _get_sqs().send_message(
                 QueueUrl=PACKAGE_QUEUE_URL,
                 MessageBody=json.dumps(
                     {
@@ -157,23 +178,25 @@ def handler(event, context):
 
 
 def get_client_ip(event: dict) -> str:
-    """Extract client IP from request."""
-    # Try X-Forwarded-For header first (API Gateway sets this)
-    headers = event.get("headers", {}) or {}
-    forwarded_for = headers.get("X-Forwarded-For") or headers.get("x-forwarded-for")
-    if forwarded_for:
-        # First IP in the chain is the original client
-        return forwarded_for.split(",")[0].strip()
+    """Extract client IP from API Gateway's verified source.
 
-    # Fallback to request context
-    request_context = event.get("requestContext", {})
-    identity = request_context.get("identity", {})
-    return identity.get("sourceIp", "unknown")
+    SECURITY: Always use requestContext.identity.sourceIp which is set by
+    API Gateway and cannot be spoofed by clients. Never trust X-Forwarded-For
+    header for rate limiting as it can be forged.
+    """
+    # Use API Gateway's verified source IP (cannot be spoofed)
+    source_ip = event.get("requestContext", {}).get("identity", {}).get("sourceIp")
+    if source_ip:
+        return source_ip
+
+    # Log warning if missing (shouldn't happen with proper API Gateway config)
+    logger.warning("Missing sourceIp in requestContext - possible misconfiguration")
+    return "unknown"
 
 
 def rate_limit_exceeded(client_ip: str) -> bool:
     """Check if IP has exceeded daily rate limit."""
-    table = dynamodb.Table(API_KEYS_TABLE)
+    table = _get_dynamodb().Table(API_KEYS_TABLE)
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     rate_limit_key = f"RATE_LIMIT#{client_ip}#{today}"
 
@@ -193,7 +216,7 @@ def rate_limit_exceeded(client_ip: str) -> bool:
 
 def record_rate_limit_usage(client_ip: str):
     """Record rate limit usage for IP."""
-    table = dynamodb.Table(API_KEYS_TABLE)
+    table = _get_dynamodb().Table(API_KEYS_TABLE)
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     rate_limit_key = f"RATE_LIMIT#{client_ip}#{today}"
 

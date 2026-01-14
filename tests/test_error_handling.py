@@ -43,15 +43,16 @@ class TestDynamoDBFailures:
         api_gateway_event["pathParameters"] = {"ecosystem": "npm", "name": "lodash"}
         api_gateway_event["headers"]["x-api-key"] = test_key
 
-        # Patch dynamodb Table to raise ClientError on get_item
-        with patch("api.get_package.dynamodb") as mock_dynamo:
-            mock_table = MagicMock()
-            mock_dynamo.Table.return_value = mock_table
-            mock_table.get_item.side_effect = ClientError(
-                {"Error": {"Code": "ServiceUnavailable", "Message": "Service unavailable"}},
-                "GetItem"
-            )
+        # Patch _get_dynamodb to return mock that raises ClientError on get_item
+        mock_dynamo = MagicMock()
+        mock_table = MagicMock()
+        mock_dynamo.Table.return_value = mock_table
+        mock_table.get_item.side_effect = ClientError(
+            {"Error": {"Code": "ServiceUnavailable", "Message": "Service unavailable"}},
+            "GetItem"
+        )
 
+        with patch("api.get_package._get_dynamodb", return_value=mock_dynamo):
             from api.get_package import handler
             result = handler(api_gateway_event, {})
 
@@ -224,15 +225,16 @@ class TestDynamoDemoRateLimitFailures:
         api_gateway_event["pathParameters"] = {"ecosystem": "npm", "name": "lodash"}
         # No API key - demo mode
 
-        with patch("api.get_package.dynamodb") as mock_dynamo:
-            mock_table = MagicMock()
-            mock_dynamo.Table.return_value = mock_table
-            # First call for rate limit check fails
-            mock_table.update_item.side_effect = ClientError(
-                {"Error": {"Code": "ThrottlingException", "Message": "Throttled"}},
-                "UpdateItem"
-            )
+        mock_dynamo = MagicMock()
+        mock_table = MagicMock()
+        mock_dynamo.Table.return_value = mock_table
+        # First call for rate limit check fails
+        mock_table.update_item.side_effect = ClientError(
+            {"Error": {"Code": "ThrottlingException", "Message": "Throttled"}},
+            "UpdateItem"
+        )
 
+        with patch("api.get_package._get_dynamodb", return_value=mock_dynamo):
             from api.get_package import handler
             result = handler(api_gateway_event, {})
 
@@ -1040,11 +1042,12 @@ class TestErrorResponseConsistency:
         api_gateway_event["pathParameters"] = {"ecosystem": "npm", "name": "lodash"}
         api_gateway_event["headers"]["x-api-key"] = test_key
 
-        with patch("api.get_package.dynamodb") as mock_dynamo:
-            mock_table = MagicMock()
-            mock_dynamo.Table.return_value = mock_table
-            mock_table.get_item.side_effect = Exception("Unexpected error")
+        mock_dynamo = MagicMock()
+        mock_table = MagicMock()
+        mock_dynamo.Table.return_value = mock_table
+        mock_table.get_item.side_effect = Exception("Unexpected error")
 
+        with patch("api.get_package._get_dynamodb", return_value=mock_dynamo):
             from api.get_package import handler
             result = handler(api_gateway_event, {})
 
@@ -1282,14 +1285,15 @@ class TestSecurityErrors:
         api_gateway_event["pathParameters"] = {"ecosystem": "npm", "name": "lodash"}
         api_gateway_event["headers"]["x-api-key"] = test_key
 
-        with patch("api.get_package.dynamodb") as mock_dynamo:
-            mock_table = MagicMock()
-            mock_dynamo.Table.return_value = mock_table
-            mock_table.get_item.side_effect = ClientError(
-                {"Error": {"Code": "ResourceNotFoundException", "Message": "Table pkgwatch-packages not found"}},
-                "GetItem"
-            )
+        mock_dynamo = MagicMock()
+        mock_table = MagicMock()
+        mock_dynamo.Table.return_value = mock_table
+        mock_table.get_item.side_effect = ClientError(
+            {"Error": {"Code": "ResourceNotFoundException", "Message": "Table pkgwatch-packages not found"}},
+            "GetItem"
+        )
 
+        with patch("api.get_package._get_dynamodb", return_value=mock_dynamo):
             from api.get_package import handler
             result = handler(api_gateway_event, {})
 

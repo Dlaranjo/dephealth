@@ -4,12 +4,14 @@ DynamoDB helpers for package operations.
 
 import logging
 import os
+import random
 import time
 from datetime import datetime, timezone
 from typing import Optional
 
 import boto3
 from boto3.dynamodb.conditions import Key
+from botocore.exceptions import ClientError
 
 logger = logging.getLogger(__name__)
 
@@ -27,25 +29,55 @@ def _get_dynamodb():
     return _dynamodb
 
 
-def get_package(ecosystem: str, name: str) -> Optional[dict]:
+def get_package(ecosystem: str, name: str, max_retries: int = 3) -> Optional[dict]:
     """
-    Get package data from DynamoDB.
+    Get package data from DynamoDB with retry for throttling.
 
     Args:
         ecosystem: Package ecosystem (e.g., "npm")
         name: Package name (e.g., "lodash")
+        max_retries: Maximum number of retry attempts for throttling errors
 
     Returns:
         Package data dict or None if not found
     """
     table = _get_dynamodb().Table(PACKAGES_TABLE)
 
-    try:
-        response = table.get_item(Key={"pk": f"{ecosystem}#{name}", "sk": "LATEST"})
-        return response.get("Item")
-    except Exception as e:
-        logger.error(f"Error fetching package {ecosystem}/{name}: {e}")
-        return None
+    for attempt in range(max_retries):
+        try:
+            response = table.get_item(Key={"pk": f"{ecosystem}#{name}", "sk": "LATEST"})
+            return response.get("Item")
+        except ClientError as e:
+            error_code = e.response.get("Error", {}).get("Code", "")
+            # DynamoDB throttling/transient error codes (all retryable)
+            throttling_errors = (
+                "ProvisionedThroughputExceededException",
+                "RequestLimitExceeded",
+                "ThrottlingException",
+                "InternalServerError",
+            )
+            if error_code in throttling_errors:
+                if attempt < max_retries - 1:
+                    # Exponential backoff with jitter to prevent thundering herd
+                    base_delay = min(0.1 * (2 ** attempt), 2.0)
+                    jitter = random.uniform(0, base_delay * 0.5)
+                    delay = base_delay + jitter
+                    logger.warning(
+                        f"DynamoDB throttled for {ecosystem}/{name}, "
+                        f"retry {attempt + 1}/{max_retries} in {delay:.2f}s"
+                    )
+                    time.sleep(delay)
+                    continue
+            # Non-throttling ClientError - don't retry
+            logger.error(f"Error fetching package {ecosystem}/{name}: {e}")
+            return None
+        except Exception as e:
+            logger.error(f"Error fetching package {ecosystem}/{name}: {e}")
+            return None
+
+    # Max retries exceeded
+    logger.error(f"Max retries exceeded for {ecosystem}/{name}")
+    return None
 
 
 def put_package(ecosystem: str, name: str, data: dict, tier: int = 3) -> None:
@@ -237,9 +269,11 @@ def batch_get_packages(ecosystem: str, names: list[str]) -> dict[str, dict]:
                     logger.error(f"Max retries ({max_retries}) exceeded for {unprocessed_count} unprocessed keys")
                     break
 
-                # Exponential backoff: 0.1s, 0.2s, 0.4s, 0.8s, 1.6s
-                delay = min(0.1 * (2 ** retry_count), 2.0)
-                logger.warning(f"Retry {retry_count}/{max_retries}: {unprocessed_count} unprocessed keys (delay: {delay}s)")
+                # Exponential backoff with jitter to prevent thundering herd
+                base_delay = min(0.1 * (2 ** retry_count), 2.0)
+                jitter = random.uniform(0, base_delay * 0.5)
+                delay = base_delay + jitter
+                logger.warning(f"Retry {retry_count}/{max_retries}: {unprocessed_count} unprocessed keys (delay: {delay:.2f}s)")
                 time.sleep(delay)
                 request_items = unprocessed
             else:

@@ -11,7 +11,9 @@ Handles:
 import hashlib
 import logging
 import os
+import random
 import secrets
+import time
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -20,6 +22,14 @@ logger = logging.getLogger(__name__)
 import boto3
 from boto3.dynamodb.conditions import Key
 from botocore.exceptions import ClientError
+
+# DynamoDB throttling error codes that should trigger retry
+THROTTLING_ERRORS = (
+    "ProvisionedThroughputExceededException",
+    "RequestLimitExceeded",
+    "ThrottlingException",
+    "InternalServerError",
+)
 
 # Lazy initialization to avoid boto3 resource creation at import time
 # This prevents "NoRegionError" during test collection when AWS isn't configured
@@ -78,14 +88,16 @@ def generate_api_key(user_id: str, tier: str = "free", email: str = None) -> str
     return api_key
 
 
-def validate_api_key(api_key: str) -> Optional[dict]:
+def validate_api_key(api_key: str, max_retries: int = 3) -> Optional[dict]:
     """
     Validate API key and return user info.
 
     Uses key-hash-index GSI for O(1) lookup.
+    Includes retry with exponential backoff for DynamoDB throttling.
 
     Args:
         api_key: The API key to validate (e.g., "pw_abc123...")
+        max_retries: Maximum retry attempts for throttling errors
 
     Returns:
         User info dict or None if invalid
@@ -102,34 +114,55 @@ def validate_api_key(api_key: str) -> Optional[dict]:
 
     table = _get_dynamodb().Table(API_KEYS_TABLE)
 
-    try:
-        # Query using GSI for O(1) lookup by key hash
-        response = table.query(
-            IndexName="key-hash-index",
-            KeyConditionExpression=Key("key_hash").eq(key_hash),
-        )
+    for attempt in range(max_retries):
+        try:
+            # Query using GSI for O(1) lookup by key hash
+            response = table.query(
+                IndexName="key-hash-index",
+                KeyConditionExpression=Key("key_hash").eq(key_hash),
+            )
 
-        items = response.get("Items", [])
-        if not items:
+            items = response.get("Items", [])
+            if not items:
+                return None
+
+            item = items[0]
+            tier = item.get("tier", "free")
+
+            return {
+                "user_id": item["pk"],
+                "key_hash": item["sk"],  # Return for use in increment_usage
+                "tier": tier,
+                "monthly_limit": TIER_LIMITS.get(tier, TIER_LIMITS["free"]),
+                "requests_this_month": item.get("requests_this_month", 0),
+                "created_at": item.get("created_at"),
+                "email": item.get("email"),
+            }
+
+        except ClientError as e:
+            error_code = e.response.get("Error", {}).get("Code", "")
+            if error_code in THROTTLING_ERRORS and attempt < max_retries - 1:
+                # Exponential backoff with jitter to prevent thundering herd
+                base_delay = min(0.1 * (2 ** attempt), 2.0)
+                jitter = random.uniform(0, base_delay * 0.5)
+                delay = base_delay + jitter
+                logger.warning(
+                    f"DynamoDB throttled during auth, retry {attempt + 1}/{max_retries} in {delay:.2f}s"
+                )
+                time.sleep(delay)
+                continue
+            # Non-throttling error or max retries exceeded
+            logger.error(f"Error validating API key: {e}")
             return None
 
-        item = items[0]
-        tier = item.get("tier", "free")
+        except Exception as e:
+            # Log error but don't expose details
+            logger.error(f"Error validating API key: {e}")
+            return None
 
-        return {
-            "user_id": item["pk"],
-            "key_hash": item["sk"],  # Return for use in increment_usage
-            "tier": tier,
-            "monthly_limit": TIER_LIMITS.get(tier, TIER_LIMITS["free"]),
-            "requests_this_month": item.get("requests_this_month", 0),
-            "created_at": item.get("created_at"),
-            "email": item.get("email"),
-        }
-
-    except Exception as e:
-        # Log error but don't expose details
-        logger.error(f"Error validating API key: {e}")
-        return None
+    # Max retries exceeded
+    logger.error("Max retries exceeded validating API key")
+    return None
 
 
 def increment_usage(user_id: str, key_hash: str, count: int = 1) -> int:

@@ -184,6 +184,32 @@ def mock_dynamodb():
             BillingMode="PAY_PER_REQUEST",
         )
 
+        # Billing events table for webhook audit trail
+        dynamodb.create_table(
+            TableName="pkgwatch-billing-events",
+            KeySchema=[
+                {"AttributeName": "pk", "KeyType": "HASH"},   # event_id
+                {"AttributeName": "sk", "KeyType": "RANGE"},  # event_type
+            ],
+            AttributeDefinitions=[
+                {"AttributeName": "pk", "AttributeType": "S"},
+                {"AttributeName": "sk", "AttributeType": "S"},
+                {"AttributeName": "customer_id", "AttributeType": "S"},
+                {"AttributeName": "processed_at", "AttributeType": "S"},
+            ],
+            GlobalSecondaryIndexes=[
+                {
+                    "IndexName": "customer-index",
+                    "KeySchema": [
+                        {"AttributeName": "customer_id", "KeyType": "HASH"},
+                        {"AttributeName": "processed_at", "KeyType": "RANGE"},
+                    ],
+                    "Projection": {"ProjectionType": "ALL"},
+                },
+            ],
+            BillingMode="PAY_PER_REQUEST",
+        )
+
         yield dynamodb
 
 

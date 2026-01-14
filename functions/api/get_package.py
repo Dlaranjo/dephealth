@@ -12,9 +12,6 @@ import os
 from datetime import datetime, timezone
 from decimal import Decimal
 
-import boto3
-from boto3.dynamodb.conditions import Key
-
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
@@ -41,7 +38,19 @@ DEMO_ALLOWED_ORIGINS = (
 )
 
 
-dynamodb = boto3.resource("dynamodb")
+# Lazy initialization to reduce cold start overhead
+_dynamodb = None
+
+
+def _get_dynamodb():
+    """Get DynamoDB resource, creating it lazily on first use."""
+    global _dynamodb
+    if _dynamodb is None:
+        import boto3
+        _dynamodb = boto3.resource("dynamodb")
+    return _dynamodb
+
+
 PACKAGES_TABLE = os.environ.get("PACKAGES_TABLE", "pkgwatch-packages")
 DEMO_RATE_LIMIT_TABLE = os.environ.get("API_KEYS_TABLE", "pkgwatch-api-keys")
 
@@ -133,7 +142,7 @@ def _check_demo_rate_limit(client_ip: str) -> tuple[bool, int]:
     """
     from botocore.exceptions import ClientError
 
-    table = dynamodb.Table(DEMO_RATE_LIMIT_TABLE)
+    table = _get_dynamodb().Table(DEMO_RATE_LIMIT_TABLE)
     now = datetime.now(timezone.utc)
     current_hour = now.strftime("%Y-%m-%d-%H")
     pk = f"demo#{client_ip}"
@@ -237,7 +246,7 @@ def handler(event, context):
         )
 
     # Fetch package from DynamoDB
-    table = dynamodb.Table(PACKAGES_TABLE)
+    table = _get_dynamodb().Table(PACKAGES_TABLE)
 
     try:
         response = table.get_item(Key={"pk": f"{ecosystem}#{name}", "sk": "LATEST"})

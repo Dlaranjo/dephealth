@@ -144,7 +144,11 @@ class TestRequestPackageHandler:
         with patch.object(module, "validate_package_exists", new_callable=AsyncMock) as mock_validate:
             mock_validate.return_value = True
 
-            with patch.object(module, "sqs") as mock_sqs:
+            # Create a mock SQS client
+            mock_sqs = MagicMock()
+
+            # Patch the lazy getter to return our mock
+            with patch.object(module, "_get_sqs", return_value=mock_sqs):
                 event = {**api_gateway_event, "body": json.dumps({"name": "new-pkg"})}
                 result = module.handler(event, None)
 
@@ -201,7 +205,8 @@ class TestRequestPackageHandler:
         with patch.object(module, "validate_package_exists", new_callable=AsyncMock) as mock_validate:
             mock_validate.return_value = True
 
-            with patch.object(module, "sqs"):
+            # Patch the lazy SQS getter
+            with patch.object(module, "_get_sqs", return_value=MagicMock()):
                 event = {
                     **api_gateway_event,
                     "body": json.dumps({"name": "requests", "ecosystem": "pypi"}),
@@ -278,22 +283,26 @@ class TestRateLimitHelpers:
         )
         assert item["Item"]["request_count"] == 1
 
-    def test_get_client_ip_from_forwarded_header(self, api_gateway_event):
-        """Should extract IP from X-Forwarded-For header."""
+    def test_get_client_ip_uses_source_ip_not_forwarded_header(self, api_gateway_event):
+        """Should use sourceIp and ignore X-Forwarded-For to prevent spoofing."""
         import importlib
         import api.request_package as module
 
         importlib.reload(module)
 
+        # Even when X-Forwarded-For is present, sourceIp should be used
+        # This prevents rate limit bypass via header spoofing
         event = {
             **api_gateway_event,
-            "headers": {"X-Forwarded-For": "203.0.113.1, 70.41.3.18"},
+            "headers": {"X-Forwarded-For": "203.0.113.1, 70.41.3.18"},  # Spoofed header
+            "requestContext": {"identity": {"sourceIp": "10.0.0.1"}},  # Real IP
         }
         ip = module.get_client_ip(event)
-        assert ip == "203.0.113.1"
+        # Should use the verified sourceIp, not the spoofable X-Forwarded-For
+        assert ip == "10.0.0.1"
 
     def test_get_client_ip_from_source_ip(self, api_gateway_event):
-        """Should fall back to sourceIp when no forwarded header."""
+        """Should use sourceIp from API Gateway's verified identity."""
         import importlib
         import api.request_package as module
 
@@ -306,3 +315,18 @@ class TestRateLimitHelpers:
         }
         ip = module.get_client_ip(event)
         assert ip == "10.0.0.1"
+
+    def test_get_client_ip_returns_unknown_when_missing(self, api_gateway_event):
+        """Should return 'unknown' when sourceIp is not available."""
+        import importlib
+        import api.request_package as module
+
+        importlib.reload(module)
+
+        event = {
+            **api_gateway_event,
+            "headers": {"X-Forwarded-For": "203.0.113.1"},  # This should be ignored
+            "requestContext": {"identity": {}},  # No sourceIp
+        }
+        ip = module.get_client_ip(event)
+        assert ip == "unknown"

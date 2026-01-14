@@ -14,15 +14,34 @@ import boto3
 import stripe
 from boto3.dynamodb.conditions import Key
 from botocore.exceptions import ClientError
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
-dynamodb = boto3.resource("dynamodb")
-secretsmanager = boto3.client("secretsmanager")
+# Lazy initialization to reduce cold start overhead
+_dynamodb = None
+_secretsmanager = None
+
+
+def _get_dynamodb():
+    """Get DynamoDB resource, creating it lazily on first use."""
+    global _dynamodb
+    if _dynamodb is None:
+        _dynamodb = boto3.resource("dynamodb")
+    return _dynamodb
+
+
+def _get_secretsmanager():
+    """Get Secrets Manager client, creating it lazily on first use."""
+    global _secretsmanager
+    if _secretsmanager is None:
+        _secretsmanager = boto3.client("secretsmanager")
+    return _secretsmanager
+
 
 API_KEYS_TABLE = os.environ.get("API_KEYS_TABLE", "pkgwatch-api-keys")
+BILLING_EVENTS_TABLE = os.environ.get("BILLING_EVENTS_TABLE", "pkgwatch-billing-events")
 STRIPE_SECRET_ARN = os.environ.get("STRIPE_SECRET_ARN")
 STRIPE_WEBHOOK_SECRET_ARN = os.environ.get("STRIPE_WEBHOOK_SECRET_ARN")
 
@@ -30,6 +49,9 @@ STRIPE_WEBHOOK_SECRET_ARN = os.environ.get("STRIPE_WEBHOOK_SECRET_ARN")
 import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "../shared"))
 from constants import TIER_LIMITS, TIER_ORDER
+
+# Payment failure grace period - days to wait before downgrading
+GRACE_PERIOD_DAYS = int(os.environ.get("PAYMENT_GRACE_PERIOD_DAYS", "7"))
 
 # Tier mapping from Stripe price IDs (configured via environment)
 # Use `or` to handle empty string env vars (CDK fallback sets "" when not configured)
@@ -55,10 +77,11 @@ def get_stripe_secrets() -> tuple[str | None, str | None]:
 
     api_key = None
     webhook_secret = None
+    sm = _get_secretsmanager()
 
     if STRIPE_SECRET_ARN:
         try:
-            response = secretsmanager.get_secret_value(SecretId=STRIPE_SECRET_ARN)
+            response = sm.get_secret_value(SecretId=STRIPE_SECRET_ARN)
             secret_value = response.get("SecretString", "")
             try:
                 secret_json = json.loads(secret_value)
@@ -70,7 +93,7 @@ def get_stripe_secrets() -> tuple[str | None, str | None]:
 
     if STRIPE_WEBHOOK_SECRET_ARN:
         try:
-            response = secretsmanager.get_secret_value(SecretId=STRIPE_WEBHOOK_SECRET_ARN)
+            response = sm.get_secret_value(SecretId=STRIPE_WEBHOOK_SECRET_ARN)
             secret_value = response.get("SecretString", "")
             try:
                 secret_json = json.loads(secret_value)
@@ -83,6 +106,92 @@ def get_stripe_secrets() -> tuple[str | None, str | None]:
     _stripe_secrets_cache = (api_key, webhook_secret)
     _stripe_secrets_cache_time = time.time()
     return api_key, webhook_secret
+
+
+# ===========================================
+# Billing Event Audit Trail
+# ===========================================
+
+
+def _check_and_claim_event(event_id: str, event_type: str) -> bool:
+    """Atomically check if event exists and claim it if not.
+
+    Uses conditional write to prevent race conditions - if two Lambda
+    invocations try to process the same event simultaneously, only one
+    will succeed in claiming it.
+
+    Returns:
+        True if successfully claimed (should process)
+        False if already exists (duplicate - skip processing)
+    """
+    table = _get_dynamodb().Table(BILLING_EVENTS_TABLE)
+    try:
+        table.put_item(
+            Item={
+                "pk": event_id,
+                "sk": event_type,
+                "status": "processing",
+                "processed_at": datetime.now(timezone.utc).isoformat(),
+                "ttl": int((datetime.now(timezone.utc) + timedelta(days=90)).timestamp()),
+            },
+            ConditionExpression="attribute_not_exists(pk)",
+        )
+        return True  # Successfully claimed
+    except ClientError as e:
+        if e.response["Error"]["Code"] == "ConditionalCheckFailedException":
+            return False  # Already exists - duplicate
+        raise
+
+
+def _release_event_claim(event_id: str, event_type: str):
+    """Release event claim so Stripe retries can re-process.
+
+    Called when a transient error occurs after claiming an event.
+    This allows the next Stripe retry to successfully claim and process the event.
+
+    Args:
+        event_id: Stripe event ID
+        event_type: Stripe event type
+    """
+    try:
+        table = _get_dynamodb().Table(BILLING_EVENTS_TABLE)
+        table.delete_item(Key={"pk": event_id, "sk": event_type})
+        logger.info(f"Released event claim for {event_id} to allow retry")
+    except Exception as e:
+        # Best-effort - log but don't fail the webhook response
+        logger.error(f"Failed to release event claim {event_id}: {e}")
+
+
+def _record_billing_event(event: dict, status: str, error: str = None):
+    """Record webhook event for audit trail (best-effort).
+
+    Uses event_id as PK for reliable deduplication (some events lack customer_id).
+    Failures are logged but do not affect webhook response.
+
+    Args:
+        event: Stripe event object
+        status: "processing", "success", or "failed"
+        error: Error message if status is "failed"
+    """
+    try:
+        table = _get_dynamodb().Table(BILLING_EVENTS_TABLE)
+        ttl = int((datetime.now(timezone.utc) + timedelta(days=90)).timestamp())
+        customer_id = event.get("data", {}).get("object", {}).get("customer") or "unknown"
+
+        table.put_item(Item={
+            "pk": event["id"],
+            "sk": event["type"],
+            "customer_id": customer_id,
+            "processed_at": datetime.now(timezone.utc).isoformat(),
+            "event_created_at": event.get("created"),  # Stripe's event timestamp
+            "livemode": event.get("livemode"),  # Distinguish test vs production
+            "status": status,
+            "error": error,
+            "ttl": ttl,
+        })
+    except Exception as e:
+        # Best-effort - audit recording should not block webhook response
+        logger.error(f"Failed to record billing event {event.get('id')}: {e}")
 
 
 def handler(event, context):
@@ -144,7 +253,16 @@ def handler(event, context):
     event_type = stripe_event["type"]
     data = stripe_event["data"]["object"]
 
-    logger.info(f"Processing Stripe event: {event_type}")
+    logger.info(f"Processing Stripe event: {event_type} (id={stripe_event['id']})")
+
+    # Check for duplicate event and atomically claim it
+    if not _check_and_claim_event(stripe_event["id"], event_type):
+        logger.info(f"Skipping duplicate event {stripe_event['id']}")
+        return {
+            "statusCode": 200,
+            "headers": {"Content-Type": "application/json"},
+            "body": json.dumps({"received": True, "duplicate": True}),
+        }
 
     try:
         if event_type == "checkout.session.completed":
@@ -162,25 +280,66 @@ def handler(event, context):
         elif event_type == "invoice.paid":
             _handle_invoice_paid(data)
 
+        elif event_type == "charge.refunded":
+            _handle_charge_refunded(data)
+
+        elif event_type == "charge.dispute.created":
+            _handle_dispute_created(data)
+
         else:
             logger.info(f"Unhandled event type: {event_type}")
 
+        # Record successful processing
+        _record_billing_event(stripe_event, "success")
+
     except ClientError as e:
-        # DynamoDB errors are transient - return 500 so Stripe retries
+        # DynamoDB errors are transient - release claim so Stripe retry can re-process
+        _release_event_claim(stripe_event["id"], event_type)
+        _record_billing_event(stripe_event, "failed", str(e))
         logger.error(f"Transient error handling {event_type}: {e}")
         return {
             "statusCode": 500,
             "headers": {"Content-Type": "application/json"},
             "body": json.dumps({"error": "Temporary error, please retry"}),
         }
-    except Exception as e:
-        logger.error(f"Error handling {event_type}: {e}")
-        # Non-transient errors - return 200 to prevent Stripe retries
-        # Don't expose internal error details in response
+    except (stripe.error.APIConnectionError, stripe.error.RateLimitError, stripe.error.APIError) as e:
+        # Transient Stripe errors - release claim so retry can re-process
+        _release_event_claim(stripe_event["id"], event_type)
+        _record_billing_event(stripe_event, "failed", str(e))
+        logger.error(f"Transient Stripe error handling {event_type}: {e}")
+        return {
+            "statusCode": 500,
+            "headers": {"Content-Type": "application/json"},
+            "body": json.dumps({"error": "Stripe error, please retry"}),
+        }
+    except stripe.error.StripeError as e:
+        # Permanent Stripe errors (InvalidRequestError, AuthenticationError, etc.)
+        _record_billing_event(stripe_event, "failed", str(e))
+        logger.error(f"Permanent Stripe error handling {event_type}: {e}")
         return {
             "statusCode": 200,
             "headers": {"Content-Type": "application/json"},
-            "body": json.dumps({"received": True, "processed": False}),
+            "body": json.dumps({"received": True, "processed": False, "error": "Stripe validation error"}),
+        }
+    except (ValueError, KeyError, TypeError, AttributeError) as e:
+        # Data validation errors are permanent - return 200, don't retry
+        # Don't leak internal field names in response
+        _record_billing_event(stripe_event, "failed", str(e))
+        logger.error(f"Permanent error handling {event_type}: {e}")
+        return {
+            "statusCode": 200,
+            "headers": {"Content-Type": "application/json"},
+            "body": json.dumps({"received": True, "processed": False, "error": "Invalid event data"}),
+        }
+    except Exception as e:
+        # Unknown errors - release claim and return 500 to be safe
+        _release_event_claim(stripe_event["id"], event_type)
+        _record_billing_event(stripe_event, "failed", str(e))
+        logger.error(f"Unexpected error handling {event_type}: {e}", exc_info=True)
+        return {
+            "statusCode": 500,
+            "headers": {"Content-Type": "application/json"},
+            "body": json.dumps({"error": "Processing failed"}),
         }
 
     return {
@@ -195,7 +354,7 @@ def _customer_exists(customer_id: str) -> bool:
     if not customer_id:
         return False
 
-    table = dynamodb.Table(API_KEYS_TABLE)
+    table = _get_dynamodb().Table(API_KEYS_TABLE)
     try:
         response = table.query(
             IndexName="stripe-customer-index",
@@ -320,7 +479,13 @@ def _handle_subscription_deleted(subscription: dict):
 
 
 def _handle_payment_failed(invoice: dict):
-    """Handle failed payment - downgrade after 3 failures."""
+    """Handle failed payment with grace period before downgrade.
+
+    Grace period workflow:
+    1. First failure: Set first_payment_failure_at, start grace period
+    2. Subsequent failures within grace period: Update failure count, no downgrade
+    3. After grace period expires AND 3+ failures: Downgrade to free tier
+    """
     customer_id = invoice.get("customer")
     customer_email = invoice.get("customer_email")
     attempt_count = invoice.get("attempt_count", 1)
@@ -331,7 +496,7 @@ def _handle_payment_failed(invoice: dict):
         logger.warning("No customer ID in failed payment invoice")
         return
 
-    table = dynamodb.Table(API_KEYS_TABLE)
+    table = _get_dynamodb().Table(API_KEYS_TABLE)
 
     # Query by stripe_customer_id using GSI
     response = table.query(
@@ -344,21 +509,80 @@ def _handle_payment_failed(invoice: dict):
         logger.warning(f"No user found for Stripe customer {customer_id}")
         return
 
+    now = datetime.now(timezone.utc)
+
     for item in items:
-        if attempt_count >= 3:
-            # Downgrade to free after 3 failed attempts
-            table.update_item(
-                Key={"pk": item["pk"], "sk": item["sk"]},
-                UpdateExpression="SET tier = :tier, payment_failures = :fails, tier_updated_at = :now",
-                ExpressionAttributeValues={
-                    ":tier": "free",
-                    ":fails": attempt_count,
-                    ":now": datetime.now(timezone.utc).isoformat(),
-                },
-            )
-            logger.warning(f"Downgraded {item['pk']} to free after {attempt_count} failed payments")
+        first_failure = item.get("first_payment_failure_at")
+
+        if attempt_count == 1 or not first_failure:
+            # First failure - start grace period
+            # Use conditional write to prevent race with successful payment
+            try:
+                table.update_item(
+                    Key={"pk": item["pk"], "sk": item["sk"]},
+                    UpdateExpression="SET payment_failures = :fails, first_payment_failure_at = :now",
+                    ConditionExpression="attribute_not_exists(first_payment_failure_at)",
+                    ExpressionAttributeValues={
+                        ":fails": attempt_count,
+                        ":now": now.isoformat(),
+                    },
+                )
+                logger.info(f"Payment failed for {item['pk']}, grace period started ({GRACE_PERIOD_DAYS} days)")
+            except ClientError as e:
+                if e.response["Error"]["Code"] == "ConditionalCheckFailedException":
+                    # Grace period already started by concurrent request - just update count
+                    table.update_item(
+                        Key={"pk": item["pk"], "sk": item["sk"]},
+                        UpdateExpression="SET payment_failures = :fails",
+                        ExpressionAttributeValues={":fails": attempt_count},
+                    )
+                else:
+                    raise
+        elif attempt_count >= 3:
+            # Check if grace period expired
+            first_failure_dt = datetime.fromisoformat(first_failure.replace("Z", "+00:00"))
+            days_since_first = (now - first_failure_dt).days
+
+            if days_since_first >= GRACE_PERIOD_DAYS:
+                # Grace period expired - downgrade to free
+                # Use conditional write to prevent race with successful payment
+                try:
+                    table.update_item(
+                        Key={"pk": item["pk"], "sk": item["sk"]},
+                        UpdateExpression=(
+                            "SET tier = :tier, payment_failures = :fails, tier_updated_at = :now "
+                            "REMOVE first_payment_failure_at"
+                        ),
+                        ConditionExpression="attribute_exists(first_payment_failure_at)",
+                        ExpressionAttributeValues={
+                            ":tier": "free",
+                            ":fails": attempt_count,
+                            ":now": now.isoformat(),
+                        },
+                    )
+                    logger.warning(
+                        f"Downgraded {item['pk']} to free after {days_since_first} days "
+                        f"grace period and {attempt_count} failed payments"
+                    )
+                except ClientError as e:
+                    if e.response["Error"]["Code"] == "ConditionalCheckFailedException":
+                        # Successful payment cleared grace period - don't downgrade
+                        logger.info(f"Skipping downgrade for {item['pk']} - payment succeeded during processing")
+                    else:
+                        raise
+            else:
+                # Still in grace period - update failure count only
+                days_remaining = GRACE_PERIOD_DAYS - days_since_first
+                table.update_item(
+                    Key={"pk": item["pk"], "sk": item["sk"]},
+                    UpdateExpression="SET payment_failures = :fails",
+                    ExpressionAttributeValues={":fails": attempt_count},
+                )
+                logger.info(
+                    f"Payment failed for {item['pk']}, {days_remaining} days left in grace period"
+                )
         else:
-            # Just track the failure count
+            # 2nd failure - just track the failure count
             table.update_item(
                 Key={"pk": item["pk"], "sk": item["sk"]},
                 UpdateExpression="SET payment_failures = :fails",
@@ -412,6 +636,46 @@ def _handle_invoice_paid(invoice: dict):
     )
 
 
+def _handle_charge_refunded(charge: dict):
+    """Handle refund event - log for audit trail, no tier change needed.
+
+    Refunds are recorded in billing_events for dispute investigation.
+    The main handler already records the event, so we just log details here.
+
+    Args:
+        charge: Stripe charge object
+    """
+    customer_id = charge.get("customer")
+    amount_refunded = charge.get("amount_refunded", 0)
+    refund_reason = charge.get("refund_reason") or "not_specified"
+
+    logger.info(
+        f"Refund processed for customer {customer_id}: "
+        f"${amount_refunded/100:.2f} (reason: {refund_reason})"
+    )
+
+
+def _handle_dispute_created(dispute: dict):
+    """Handle dispute event - log and flag for review.
+
+    Disputes are recorded in billing_events for investigation.
+    The main handler already records the event, so we just log details here.
+
+    Args:
+        dispute: Stripe dispute object
+    """
+    # Customer ID can be nested in charge object
+    customer_id = dispute.get("customer") or dispute.get("charge", {}).get("customer")
+    reason = dispute.get("reason", "not_specified")
+    amount = dispute.get("amount", 0)
+
+    logger.warning(
+        f"Dispute created for customer {customer_id}: "
+        f"${amount/100:.2f} (reason: {reason})"
+    )
+    # TODO: Could add admin notification or account flagging here
+
+
 def _extract_period_from_invoice(invoice: dict) -> tuple[int | None, int | None]:
     """Extract billing period start/end from invoice lines.
 
@@ -439,8 +703,12 @@ def _reset_user_usage_for_billing_cycle(
 ):
     """Reset usage counters for a paid user when billing cycle renews.
 
-    Uses idempotency check via last_reset_period_start to prevent double resets
-    from webhook replays, backup job races, or subscription churn abuse.
+    Uses atomic ConditionExpression to prevent TOCTOU race conditions and ensure
+    idempotent processing. Only updates records where:
+    - last_reset_period_start doesn't exist (new users), OR
+    - last_reset_period_start < period_start (new billing period)
+
+    Also clears payment failure grace period state on successful billing.
 
     Updates both per-key and USER_META counters for consistency.
 
@@ -449,7 +717,7 @@ def _reset_user_usage_for_billing_cycle(
         period_start: Unix timestamp of new billing period start
         period_end: Unix timestamp of new billing period end
     """
-    table = dynamodb.Table(API_KEYS_TABLE)
+    table = _get_dynamodb().Table(API_KEYS_TABLE)
     reset_time = datetime.now(timezone.utc).isoformat()
 
     # Query all records for this Stripe customer
@@ -465,43 +733,47 @@ def _reset_user_usage_for_billing_cycle(
         )
         return
 
-    # Check idempotency - only reset if this is a new period
-    # Use first item to check (all items for same user should have same value)
-    current_last_reset = items[0].get("last_reset_period_start", 0)
-    if period_start <= current_last_reset:
-        logger.info(
-            f"Skipping reset for customer {customer_id} - "
-            f"already reset for period starting {period_start} "
-            f"(last_reset_period_start={current_last_reset})"
-        )
-        return
-
     user_id = items[0]["pk"]  # Get user_id for USER_META update
 
-    # Reset all API key records
+    # Reset all API key records with atomic idempotency check
     reset_count = 0
+    skipped_count = 0
     for item in items:
         # Skip PENDING records
         if item.get("sk") == "PENDING":
             continue
 
-        table.update_item(
-            Key={"pk": item["pk"], "sk": item["sk"]},
-            UpdateExpression=(
-                "SET requests_this_month = :zero, "
-                "current_period_start = :period_start, "
-                "current_period_end = :period_end, "
-                "last_reset_period_start = :period_start, "
-                "last_usage_reset = :now"
-            ),
-            ExpressionAttributeValues={
-                ":zero": 0,
-                ":period_start": period_start,
-                ":period_end": period_end,
-                ":now": reset_time,
-            },
-        )
-        reset_count += 1
+        try:
+            # Use ConditionExpression for atomic idempotency (prevents TOCTOU race)
+            table.update_item(
+                Key={"pk": item["pk"], "sk": item["sk"]},
+                UpdateExpression=(
+                    "SET requests_this_month = :zero, "
+                    "current_period_start = :period_start, "
+                    "current_period_end = :period_end, "
+                    "last_reset_period_start = :period_start, "
+                    "last_usage_reset = :now, "
+                    "payment_failures = :zero "
+                    "REMOVE first_payment_failure_at"
+                ),
+                ConditionExpression=(
+                    "attribute_not_exists(last_reset_period_start) OR "
+                    "last_reset_period_start < :period_start"
+                ),
+                ExpressionAttributeValues={
+                    ":zero": 0,
+                    ":period_start": period_start,
+                    ":period_end": period_end,
+                    ":now": reset_time,
+                },
+            )
+            reset_count += 1
+        except ClientError as e:
+            if e.response["Error"]["Code"] == "ConditionalCheckFailedException":
+                # Already reset for this period - skip silently
+                skipped_count += 1
+            else:
+                raise
 
     # Also reset USER_META (authoritative for rate limiting)
     try:
@@ -513,22 +785,27 @@ def _reset_user_usage_for_billing_cycle(
                 "last_reset_period_start = :period_start, "
                 "last_usage_reset = :now"
             ),
+            ConditionExpression=(
+                "attribute_exists(pk) AND ("
+                "attribute_not_exists(last_reset_period_start) OR "
+                "last_reset_period_start < :period_start)"
+            ),
             ExpressionAttributeValues={
                 ":zero": 0,
                 ":period_start": period_start,
                 ":period_end": period_end,
                 ":now": reset_time,
             },
-            ConditionExpression="attribute_exists(pk)",
         )
     except ClientError as e:
         if e.response["Error"]["Code"] != "ConditionalCheckFailedException":
             raise
-        # USER_META doesn't exist yet - that's OK for users without usage history
+        # USER_META doesn't exist or already reset - that's OK
 
     logger.info(
         f"Reset usage for customer {customer_id}: "
-        f"{reset_count} key records, period={period_start}-{period_end}"
+        f"{reset_count} records reset, {skipped_count} already processed, "
+        f"period={period_start}-{period_end}"
     )
 
 
@@ -558,7 +835,7 @@ def _update_user_tier(
         logger.error("Cannot update tier: no email provided")
         return
 
-    table = dynamodb.Table(API_KEYS_TABLE)
+    table = _get_dynamodb().Table(API_KEYS_TABLE)
 
     # Query by email using GSI
     response = table.query(
@@ -650,7 +927,7 @@ def _update_user_tier_by_customer_id(
         logger.error("Cannot update tier: no customer_id provided")
         return
 
-    table = dynamodb.Table(API_KEYS_TABLE)
+    table = _get_dynamodb().Table(API_KEYS_TABLE)
 
     # Query GSI by stripe_customer_id
     response = table.query(
@@ -736,7 +1013,7 @@ def _update_user_subscription_state(
         logger.error("Cannot update subscription state: no customer_id provided")
         return
 
-    table = dynamodb.Table(API_KEYS_TABLE)
+    table = _get_dynamodb().Table(API_KEYS_TABLE)
 
     # Query GSI by stripe_customer_id
     response = table.query(

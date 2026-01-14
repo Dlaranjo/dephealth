@@ -20,6 +20,7 @@ import * as path from "path";
 interface ApiStackProps extends cdk.StackProps {
   packagesTable: dynamodb.Table;
   apiKeysTable: dynamodb.Table;
+  billingEventsTable: dynamodb.Table;
   alertTopic?: sns.Topic;
   packageQueue?: sqs.Queue; // For package request API endpoint
 }
@@ -30,7 +31,7 @@ export class ApiStack extends cdk.Stack {
   constructor(scope: Construct, id: string, props: ApiStackProps) {
     super(scope, id, props);
 
-    const { packagesTable, apiKeysTable, alertTopic, packageQueue } = props;
+    const { packagesTable, apiKeysTable, billingEventsTable, alertTopic, packageQueue } = props;
 
     // ===========================================
     // Stripe Environment Variable Validation
@@ -114,6 +115,7 @@ export class ApiStack extends cdk.Stack {
       environment: {
         PACKAGES_TABLE: packagesTable.tableName,
         API_KEYS_TABLE: apiKeysTable.tableName,
+        BILLING_EVENTS_TABLE: billingEventsTable.tableName,
         STRIPE_SECRET_ARN: "pkgwatch/stripe-secret",  // Use name, not partial ARN
         STRIPE_WEBHOOK_SECRET_ARN: "pkgwatch/stripe-webhook",  // Use name, not partial ARN
         ...(isDevMode && { ALLOW_DEV_CORS: "true" }), // Allow localhost CORS in dev
@@ -199,6 +201,7 @@ export class ApiStack extends cdk.Stack {
     );
 
     apiKeysTable.grantReadWriteData(stripeWebhookHandler);
+    billingEventsTable.grantReadWriteData(stripeWebhookHandler);
     stripeSecret.grantRead(stripeWebhookHandler);
     stripeWebhookSecret.grantRead(stripeWebhookHandler);
 
