@@ -70,11 +70,20 @@ export class StorageStack extends cdk.Stack {
 
     // GSI for querying packages by data completeness status
     // Used by retry_dispatcher.py to find incomplete packages due for retry
+    // Note: data-status-index-v2 replaces data-status-index which had KEYS_ONLY projection
+    // Includes filter attributes: retry_count, retry_dispatched_at
+    // Includes SQS message attributes: missing_sources, tier
     this.packagesTable.addGlobalSecondaryIndex({
-      indexName: "data-status-index",
+      indexName: "data-status-index-v2",
       partitionKey: { name: "data_status", type: dynamodb.AttributeType.STRING },
       sortKey: { name: "next_retry_at", type: dynamodb.AttributeType.STRING },
-      projectionType: dynamodb.ProjectionType.KEYS_ONLY,
+      projectionType: dynamodb.ProjectionType.INCLUDE,
+      nonKeyAttributes: [
+        "retry_count",
+        "retry_dispatched_at",
+        "missing_sources",
+        "tier",
+      ],
     });
 
     // ===========================================
