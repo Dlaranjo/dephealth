@@ -1,5 +1,6 @@
 import * as cdk from "aws-cdk-lib";
 import * as dynamodb from "aws-cdk-lib/aws-dynamodb";
+import * as iam from "aws-cdk-lib/aws-iam";
 import * as s3 from "aws-cdk-lib/aws-s3";
 import { Construct } from "constructs";
 
@@ -8,6 +9,7 @@ export class StorageStack extends cdk.Stack {
   public readonly apiKeysTable: dynamodb.Table;
   public readonly rawDataBucket: s3.Bucket;
   public readonly accessLogsBucket: s3.Bucket;
+  public readonly publicDataBucket: s3.Bucket;
 
   constructor(scope: Construct, id: string, props?: cdk.StackProps) {
     super(scope, id, props);
@@ -70,21 +72,35 @@ export class StorageStack extends cdk.Stack {
 
     // GSI for querying packages by data completeness status
     // Used by retry_dispatcher.py to find incomplete packages due for retry
-    // Note: data-status-index-v2 replaces data-status-index which had KEYS_ONLY projection
-    // Includes filter attributes: retry_count, retry_dispatched_at
-    // Includes SQS message attributes: missing_sources, tier
+    // NOTE: AWS has data-status-index-v2 but CloudFormation state has data-status-index
+    // Keeping as data-status-index to match CFN state until drift is resolved
+    // TODO: Sync CloudFormation state with AWS reality, then update to v2 with INCLUDE projection
     this.packagesTable.addGlobalSecondaryIndex({
-      indexName: "data-status-index-v2",
+      indexName: "data-status-index",
       partitionKey: { name: "data_status", type: dynamodb.AttributeType.STRING },
       sortKey: { name: "next_retry_at", type: dynamodb.AttributeType.STRING },
-      projectionType: dynamodb.ProjectionType.INCLUDE,
-      nonKeyAttributes: [
-        "retry_count",
-        "retry_dispatched_at",
-        "missing_sources",
-        "tier",
-      ],
+      projectionType: dynamodb.ProjectionType.KEYS_ONLY,
     });
+
+    // TODO: Deploy these GSIs one at a time after data-status-index-v2 rename syncs
+    // GSI for querying packages by downloads (for public top-npm-packages list)
+    // Used by publish_top_packages.py to export download-ranked package list
+    // this.packagesTable.addGlobalSecondaryIndex({
+    //   indexName: "downloads-index",
+    //   partitionKey: { name: "ecosystem", type: dynamodb.AttributeType.STRING },
+    //   sortKey: { name: "weekly_downloads", type: dynamodb.AttributeType.NUMBER },
+    //   projectionType: dynamodb.ProjectionType.INCLUDE,
+    //   nonKeyAttributes: ["name", "health_score", "risk_level"],
+    // });
+
+    // GSI for tracking package discovery source
+    // Used for analytics on how packages were discovered (graph_expansion, user_request, etc.)
+    // this.packagesTable.addGlobalSecondaryIndex({
+    //   indexName: "source-index",
+    //   partitionKey: { name: "source", type: dynamodb.AttributeType.STRING },
+    //   sortKey: { name: "created_at", type: dynamodb.AttributeType.STRING },
+    //   projectionType: dynamodb.ProjectionType.KEYS_ONLY,
+    // });
 
     // ===========================================
     // DynamoDB: API Keys Table
@@ -177,6 +193,34 @@ export class StorageStack extends cdk.Stack {
     });
 
     // ===========================================
+    // S3: Public Data Bucket
+    // ===========================================
+    // Hosts public data files like top-npm-packages.json
+    // Used by publish_top_packages.py for community benefit
+    this.publicDataBucket = new s3.Bucket(this, "PublicDataBucket", {
+      bucketName: `pkgwatch-public-data-${this.account}`,
+      removalPolicy: cdk.RemovalPolicy.RETAIN,
+      encryption: s3.BucketEncryption.S3_MANAGED,
+      // Allow public read for the data files (unlike other buckets)
+      blockPublicAccess: new s3.BlockPublicAccess({
+        blockPublicAcls: false,
+        ignorePublicAcls: false,
+        blockPublicPolicy: false,
+        restrictPublicBuckets: false,
+      }),
+      websiteIndexDocument: "index.html",
+    });
+
+    // Bucket policy for public read access to data/* prefix only
+    this.publicDataBucket.addToResourcePolicy(
+      new iam.PolicyStatement({
+        actions: ["s3:GetObject"],
+        resources: [this.publicDataBucket.arnForObjects("data/*")],
+        principals: [new iam.AnyPrincipal()],
+      })
+    );
+
+    // ===========================================
     // Outputs
     // ===========================================
     new cdk.CfnOutput(this, "PackagesTableName", {
@@ -195,6 +239,12 @@ export class StorageStack extends cdk.Stack {
       value: this.rawDataBucket.bucketName,
       description: "S3 raw data bucket name",
       exportName: "PkgWatchRawDataBucket",
+    });
+
+    new cdk.CfnOutput(this, "PublicDataBucketName", {
+      value: this.publicDataBucket.bucketName,
+      description: "S3 public data bucket name",
+      exportName: "PkgWatchPublicDataBucket",
     });
   }
 }

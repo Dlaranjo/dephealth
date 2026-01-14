@@ -9,6 +9,7 @@ import * as logs from "aws-cdk-lib/aws-logs";
 import * as secretsmanager from "aws-cdk-lib/aws-secretsmanager";
 import * as ses from "aws-cdk-lib/aws-ses";
 import * as sns from "aws-cdk-lib/aws-sns";
+import * as sqs from "aws-cdk-lib/aws-sqs";
 import * as targets from "aws-cdk-lib/aws-events-targets";
 import * as wafv2 from "aws-cdk-lib/aws-wafv2";
 import * as cw_actions from "aws-cdk-lib/aws-cloudwatch-actions";
@@ -20,6 +21,7 @@ interface ApiStackProps extends cdk.StackProps {
   packagesTable: dynamodb.Table;
   apiKeysTable: dynamodb.Table;
   alertTopic?: sns.Topic;
+  packageQueue?: sqs.Queue; // For package request API endpoint
 }
 
 export class ApiStack extends cdk.Stack {
@@ -28,7 +30,7 @@ export class ApiStack extends cdk.Stack {
   constructor(scope: Construct, id: string, props: ApiStackProps) {
     super(scope, id, props);
 
-    const { packagesTable, apiKeysTable, alertTopic } = props;
+    const { packagesTable, apiKeysTable, alertTopic, packageQueue } = props;
 
     // ===========================================
     // Stripe Environment Variable Validation
@@ -535,6 +537,46 @@ export class ApiStack extends cdk.Stack {
     revokeApiKeyHandler.addToRolePolicy(sessionSecretPolicy);
 
     // ===========================================
+    // Package Request Handler (with collectors for validation)
+    // ===========================================
+
+    // Bundle API code with collectors for package validation
+    const apiWithCollectorsCode = lambda.Code.fromAsset(functionsDir, {
+      bundling: {
+        image: lambda.Runtime.PYTHON_3_12.bundlingImage,
+        command: [
+          "bash",
+          "-c",
+          [
+            "cp -r /asset-input/api /asset-output/",
+            "cp -r /asset-input/shared /asset-output/",
+            "cp -r /asset-input/collectors /asset-output/",
+            "pip install -r /asset-input/collectors/requirements.txt -t /asset-output/ --quiet",
+          ].join(" && "),
+        ],
+      },
+    });
+
+    // POST /packages/request - Request new package to be tracked
+    const requestPackageHandler = new lambda.Function(this, "RequestPackageHandler", {
+      ...commonLambdaProps,
+      functionName: "pkgwatch-api-request-package",
+      handler: "api.request_package.handler",
+      code: apiWithCollectorsCode,
+      description: "Request a new package to be tracked",
+      environment: {
+        ...commonLambdaProps.environment,
+        PACKAGE_QUEUE_URL: packageQueue?.queueUrl ?? "",
+      },
+    });
+
+    packagesTable.grantReadWriteData(requestPackageHandler);
+    apiKeysTable.grantReadWriteData(requestPackageHandler); // For rate limiting
+    if (packageQueue) {
+      packageQueue.grantSendMessages(requestPackageHandler);
+    }
+
+    // ===========================================
     // API Gateway
     // ===========================================
     this.api = new apigateway.RestApi(this, "PkgWatchApi", {
@@ -820,6 +862,31 @@ export class ApiStack extends cdk.Stack {
       },
     });
 
+    // Model for /packages/request endpoint
+    const requestPackageModel = new apigateway.Model(this, "RequestPackageModel", {
+      restApi: this.api,
+      contentType: "application/json",
+      modelName: "RequestPackageRequest",
+      schema: {
+        type: apigateway.JsonSchemaType.OBJECT,
+        required: ["name"],
+        properties: {
+          name: {
+            type: apigateway.JsonSchemaType.STRING,
+            minLength: 1,
+            maxLength: 256,
+            description: "Package name to request tracking for",
+          },
+          ecosystem: {
+            type: apigateway.JsonSchemaType.STRING,
+            enum: ["npm", "pypi"],
+            description: "Package ecosystem (defaults to npm)",
+          },
+        },
+        additionalProperties: false,
+      },
+    });
+
     // ===========================================
     // API Routes
     // ===========================================
@@ -852,6 +919,19 @@ export class ApiStack extends cdk.Stack {
           "method.request.path.ecosystem": true,
           "method.request.path.name": true,
           "method.request.header.Origin": false, // false = optional (not required)
+        },
+      }
+    );
+
+    // POST /packages/request - Request new package tracking
+    const requestResource = packagesResource.addResource("request");
+    requestResource.addMethod(
+      "POST",
+      new apigateway.LambdaIntegration(requestPackageHandler),
+      {
+        requestValidator: bodyValidator,
+        requestModels: {
+          "application/json": requestPackageModel,
         },
       }
     );
@@ -1242,6 +1322,7 @@ export class ApiStack extends cdk.Stack {
     createLambdaAlarms(getApiKeysHandler, "GetApiKeys");
     createLambdaAlarms(createApiKeyHandler, "CreateApiKey");
     createLambdaAlarms(revokeApiKeyHandler, "RevokeApiKey");
+    createLambdaAlarms(requestPackageHandler, "RequestPackage");
 
     // API Gateway 5XX alarm
     const api5xxAlarm = new cloudwatch.Alarm(this, "Api5xxAlarm", {

@@ -33,6 +33,7 @@ const pipelineStack = new PipelineStack(app, "PkgWatchPipeline", {
   description: "PkgWatch data collection pipeline",
   packagesTable: storageStack.packagesTable,
   rawDataBucket: storageStack.rawDataBucket,
+  publicDataBucket: storageStack.publicDataBucket, // For public data like top-npm-packages.json
   apiKeysTable: storageStack.apiKeysTable, // For global GitHub rate limiting
   alertEmail, // Email for SNS alert notifications
 });
@@ -44,6 +45,7 @@ const apiStack = new ApiStack(app, "PkgWatchApi", {
   packagesTable: storageStack.packagesTable,
   apiKeysTable: storageStack.apiKeysTable,
   alertTopic: pipelineStack.alertTopic,
+  packageQueue: pipelineStack.packageQueue, // For package request API endpoint
 });
 
 // Add tags to all resources

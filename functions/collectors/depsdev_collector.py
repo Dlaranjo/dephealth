@@ -254,3 +254,76 @@ async def get_advisories(name: str, ecosystem: str = "npm") -> list:
             return data.get("advisories", [])
         except httpx.HTTPStatusError:
             return []
+
+
+@circuit_breaker(DEPSDEV_CIRCUIT)
+async def get_dependencies(name: str, ecosystem: str = "npm") -> list[str]:
+    """
+    Get direct dependencies for a package from deps.dev.
+
+    Used by graph expander to discover new packages through dependency crawling.
+
+    Returns:
+        List of dependency package names (direct dependencies only).
+        Empty list if package not found or on error.
+    """
+    encoded_name = encode_package_name(name)
+
+    async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT) as client:
+        # 1. Get package to find latest version
+        pkg_url = f"{DEPSDEV_API}/systems/{ecosystem}/packages/{encoded_name}"
+        try:
+            pkg_resp = await retry_with_backoff(client.get, pkg_url)
+            if pkg_resp.status_code == 404:
+                return []
+            pkg_resp.raise_for_status()
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code == 404:
+                return []
+            raise
+
+        pkg_data = pkg_resp.json()
+
+        # 2. Find latest/default version
+        latest_version = pkg_data.get("defaultVersion", "")
+        if not latest_version:
+            versions = pkg_data.get("versions", [])
+            for v in versions:
+                if v.get("isDefault"):
+                    latest_version = v.get("versionKey", {}).get("version", "")
+                    break
+            if not latest_version and versions:
+                latest_version = versions[-1].get("versionKey", {}).get("version", "")
+
+        if not latest_version:
+            return []
+
+        # 3. Get dependencies for this version
+        encoded_version = quote(latest_version, safe="")
+        deps_url = f"{DEPSDEV_API}/systems/{ecosystem}/packages/{encoded_name}/versions/{encoded_version}:dependencies"
+
+        try:
+            deps_resp = await retry_with_backoff(client.get, deps_url)
+            deps_resp.raise_for_status()
+        except httpx.HTTPStatusError:
+            logger.debug(f"Could not fetch dependencies for {name}@{latest_version}")
+            return []
+
+        deps_data = deps_resp.json()
+        nodes = deps_data.get("nodes", [])
+
+        # 4. Extract direct dependencies only
+        # The first node is the package itself, remaining are dependencies
+        # Filter by relation == "DIRECT" to get only direct deps
+        direct_deps = []
+        for node in nodes:
+            relation = node.get("relation")
+            if relation == "DIRECT":
+                version_key = node.get("versionKey", {})
+                dep_name = version_key.get("name")
+                dep_ecosystem = version_key.get("system", "").lower()
+                # Only include deps from same ecosystem
+                if dep_name and dep_name != name and dep_ecosystem == ecosystem:
+                    direct_deps.append(dep_name)
+
+        return direct_deps

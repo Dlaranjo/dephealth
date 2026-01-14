@@ -18,17 +18,19 @@ import * as path from "path";
 interface PipelineStackProps extends cdk.StackProps {
   packagesTable: dynamodb.Table;
   rawDataBucket: s3.Bucket;
+  publicDataBucket: s3.Bucket; // For public data like top-npm-packages.json
   apiKeysTable: dynamodb.Table; // For global GitHub rate limiting with sharded counters
   alertEmail?: string; // Email address for SNS alert notifications
 }
 
 export class PipelineStack extends cdk.Stack {
   public readonly alertTopic: sns.Topic;
+  public readonly packageQueue: sqs.Queue;
 
   constructor(scope: Construct, id: string, props: PipelineStackProps) {
     super(scope, id, props);
 
-    const { packagesTable, rawDataBucket, apiKeysTable, alertEmail } = props;
+    const { packagesTable, rawDataBucket, publicDataBucket, apiKeysTable, alertEmail } = props;
 
     // ===========================================
     // Secrets Manager: GitHub Token
@@ -53,7 +55,7 @@ export class PipelineStack extends cdk.Stack {
 
     // Main queue for package processing jobs
     // Visibility timeout should be 6x Lambda timeout to prevent message reprocessing
-    const packageQueue = new sqs.Queue(this, "PackageQueue", {
+    this.packageQueue = new sqs.Queue(this, "PackageQueue", {
       queueName: "pkgwatch-package-queue",
       visibilityTimeout: cdk.Duration.minutes(30), // 6x Lambda timeout (5 min) per AWS best practices
       encryption: sqs.QueueEncryption.SQS_MANAGED, // Enable encryption at rest
@@ -61,6 +63,16 @@ export class PipelineStack extends cdk.Stack {
         queue: dlq,
         maxReceiveCount: 3,
       },
+    });
+    const packageQueue = this.packageQueue; // Alias for local usage
+
+    // Discovery queue for graph expansion workers
+    // Used by graph_expander_dispatcher to distribute package processing
+    const discoveryQueue = new sqs.Queue(this, "DiscoveryQueue", {
+      queueName: "pkgwatch-discovery-queue",
+      visibilityTimeout: cdk.Duration.minutes(5),
+      retentionPeriod: cdk.Duration.days(1),
+      encryption: sqs.QueueEncryption.SQS_MANAGED,
     });
 
     // ===========================================
@@ -113,6 +125,25 @@ export class PipelineStack extends cdk.Stack {
             "cp -r /asset-input/admin/* /asset-output/",
             "cp -r /asset-input/shared/* /asset-output/",
             "cp -r /asset-input/shared /asset-output/",
+          ].join(" && "),
+        ],
+      },
+    });
+
+    // Bundle discovery functions (graph expander, publish top packages, npmsio audit)
+    const discoveryCode = lambda.Code.fromAsset(functionsDir, {
+      bundling: {
+        image: lambda.Runtime.PYTHON_3_12.bundlingImage,
+        command: [
+          "bash",
+          "-c",
+          [
+            "cp -r /asset-input/discovery/* /asset-output/",
+            "cp -r /asset-input/collectors/* /asset-output/",
+            "cp -r /asset-input/shared/* /asset-output/",
+            "cp -r /asset-input/shared /asset-output/",
+            "cp -r /asset-input/collectors /asset-output/",
+            "pip install -r /asset-input/collectors/requirements.txt -t /asset-output/ --quiet",
           ].join(" && "),
         ],
       },
@@ -363,6 +394,116 @@ export class PipelineStack extends cdk.Stack {
       schedule: events.Schedule.rate(cdk.Duration.minutes(30)),
       description: "Triggers retry dispatcher for incomplete packages",
       targets: [new targets.LambdaFunction(retryDispatcher)],
+    });
+
+    // ===========================================
+    // Lambda: Graph Expander Dispatcher
+    // ===========================================
+    // Dispatches top packages to discovery queue for dependency crawling
+    const graphExpanderDispatcher = new lambda.Function(this, "GraphExpanderDispatcher", {
+      ...commonLambdaProps,
+      functionName: "pkgwatch-graph-expander-dispatcher",
+      handler: "graph_expander_dispatcher.handler",
+      code: discoveryCode,
+      timeout: cdk.Duration.minutes(5),
+      description: "Dispatches top packages for dependency discovery",
+      environment: {
+        ...commonLambdaProps.environment,
+        DISCOVERY_QUEUE_URL: discoveryQueue.queueUrl,
+      },
+    });
+
+    packagesTable.grantReadData(graphExpanderDispatcher);
+    discoveryQueue.grantSendMessages(graphExpanderDispatcher);
+
+    // Tuesday 1:00 AM UTC (weekly) - Moved from Sunday to avoid collision with weekly refresh
+    new events.Rule(this, "GraphExpanderDispatcherSchedule", {
+      ruleName: "pkgwatch-graph-expander-dispatcher",
+      schedule: events.Schedule.cron({ hour: "1", minute: "0", weekDay: "TUE" }),
+      description: "Weekly dependency graph expansion for package discovery",
+      targets: [new targets.LambdaFunction(graphExpanderDispatcher)],
+    });
+
+    // ===========================================
+    // Lambda: Graph Expander Worker
+    // ===========================================
+    // Processes packages from discovery queue, discovers new packages
+    const graphExpanderWorker = new lambda.Function(this, "GraphExpanderWorker", {
+      ...commonLambdaProps,
+      functionName: "pkgwatch-graph-expander-worker",
+      handler: "graph_expander_worker.handler",
+      code: discoveryCode,
+      timeout: cdk.Duration.minutes(5),
+      memorySize: 1024, // More memory for async HTTP calls
+      description: "Discovers new packages through dependency crawling",
+      environment: {
+        ...commonLambdaProps.environment,
+      },
+    });
+
+    packagesTable.grantReadWriteData(graphExpanderWorker);
+    rawDataBucket.grantReadWrite(graphExpanderWorker); // For deps cache
+    packageQueue.grantSendMessages(graphExpanderWorker);
+
+    // Connect worker to discovery queue
+    graphExpanderWorker.addEventSource(
+      new lambdaEventSources.SqsEventSource(discoveryQueue, {
+        batchSize: 1, // Process one batch at a time for safety
+        maxConcurrency: 5,
+      })
+    );
+
+    // ===========================================
+    // Lambda: Publish Top Packages
+    // ===========================================
+    // Exports download-ranked package list to public S3
+    const publishTopPackages = new lambda.Function(this, "PublishTopPackages", {
+      ...commonLambdaProps,
+      functionName: "pkgwatch-publish-top-packages",
+      handler: "publish_top_packages.handler",
+      code: discoveryCode,
+      timeout: cdk.Duration.minutes(5),
+      description: "Publishes top-npm-packages.json to public S3",
+      environment: {
+        ...commonLambdaProps.environment,
+        PUBLIC_BUCKET: publicDataBucket.bucketName,
+      },
+    });
+
+    packagesTable.grantReadData(publishTopPackages);
+    publicDataBucket.grantWrite(publishTopPackages);
+
+    // Monday 5:00 AM UTC (weekly)
+    new events.Rule(this, "PublishTopPackagesSchedule", {
+      ruleName: "pkgwatch-publish-top-packages",
+      schedule: events.Schedule.cron({ hour: "5", minute: "0", weekDay: "MON" }),
+      description: "Weekly publish of top npm packages list",
+      targets: [new targets.LambdaFunction(publishTopPackages)],
+    });
+
+    // ===========================================
+    // Lambda: npms.io Audit
+    // ===========================================
+    // Quarterly audit to find missing popular packages
+    const npmsioAudit = new lambda.Function(this, "NpmsioAudit", {
+      ...commonLambdaProps,
+      functionName: "pkgwatch-npmsio-audit",
+      handler: "npmsio_audit.handler",
+      code: discoveryCode,
+      timeout: cdk.Duration.minutes(10),
+      memorySize: 1024,
+      description: "Quarterly audit against npms.io to find missing packages",
+    });
+
+    packagesTable.grantReadWriteData(npmsioAudit);
+    packageQueue.grantSendMessages(npmsioAudit);
+
+    // Quarterly: 1st of Jan, Apr, Jul, Oct at 2:00 AM UTC
+    new events.Rule(this, "NpmsioAuditSchedule", {
+      ruleName: "pkgwatch-npmsio-audit",
+      schedule: events.Schedule.expression("cron(0 2 1 1,4,7,10 ? *)"),
+      description: "Quarterly audit of package coverage against npms.io",
+      targets: [new targets.LambdaFunction(npmsioAudit)],
     });
 
     // ===========================================
