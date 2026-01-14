@@ -940,6 +940,14 @@ import Layout from '../layouts/Layout.astro';
 
       showContent();
 
+      // Check for stored redirect after login (e.g., from /login?redirect=/pricing)
+      const storedRedirect = sessionStorage.getItem('pkgwatch_redirect');
+      if (storedRedirect) {
+        sessionStorage.removeItem('pkgwatch_redirect');
+        window.location.href = storedRedirect;
+        return;
+      }
+
       // Check if user just verified their email
       const params = new URLSearchParams(window.location.search);
       if (params.has('verified')) {

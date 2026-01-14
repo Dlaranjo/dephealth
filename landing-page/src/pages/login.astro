@@ -68,6 +68,12 @@ import Layout from '../layouts/Layout.astro';
     if (buttonCooldownTimeoutId) clearTimeout(buttonCooldownTimeoutId);
   });
 
+  // Store redirect URL for after login (e.g., from /login?redirect=/pricing)
+  const redirectParam = new URLSearchParams(window.location.search).get('redirect');
+  if (redirectParam && redirectParam.startsWith('/')) {
+    sessionStorage.setItem('pkgwatch_redirect', redirectParam);
+  }
+
   // Handle button cooldown after success
   function startButtonCooldown(seconds: number): void {
     if (!submitBtn || !btnText) return;

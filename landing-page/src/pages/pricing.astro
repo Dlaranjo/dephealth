@@ -225,6 +225,11 @@ const tiers = [
       } else if (response.status === 401) {
         // Not logged in - redirect to login with return URL
         window.location.href = `/login?redirect=${encodeURIComponent('/pricing')}`;
+      } else if (response.status === 409 && data.error?.code === 'upgrade_required') {
+        // Existing subscriber - redirect to billing portal for plan changes
+        button.disabled = false;
+        button.textContent = originalText;
+        await redirectToBillingPortal();
       } else {
         alert(data.error?.message || 'Failed to start checkout');
         button.disabled = false;
@@ -235,6 +240,24 @@ const tiers = [
       alert('Network error. Please try again.');
       button.disabled = false;
       button.textContent = originalText;
+    }
+  }
+
+  // Redirect to Stripe billing portal for existing subscribers
+  async function redirectToBillingPortal() {
+    try {
+      const response = await fetch(`${API_BASE}/billing-portal/create`, {
+        method: 'POST',
+        credentials: 'include',
+      });
+      const data = await response.json();
+      if (data.portal_url) {
+        window.location.href = data.portal_url;
+      } else {
+        alert('Unable to open billing portal. Please try again.');
+      }
+    } catch {
+      alert('Network error. Please try again.');
     }
   }
 

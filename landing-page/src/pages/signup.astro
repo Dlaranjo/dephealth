@@ -96,6 +96,31 @@ import Layout from '../layouts/Layout.astro';
   }
   window.addEventListener('beforeunload', cleanupTimeouts);
 
+  // Predefined error messages (prevents URL-based phishing)
+  const ERROR_MESSAGES: Record<string, string> = {
+    'invalid_token': 'Invalid or expired verification link. Please sign up again.',
+    'token_expired': 'Your verification link has expired. Please sign up again.',
+    'token_already_used': 'This verification link has already been used. Please sign up again.',
+    'email_exists': 'An account with this email already exists. Please sign in instead.',
+    'internal_error': 'Something went wrong. Please try again.',
+  };
+
+  // Check for error params from verification callback redirects
+  function handleErrorParams(): void {
+    const params = new URLSearchParams(window.location.search);
+    const errorCode = params.get('error');
+
+    if (errorCode && errorMsg) {
+      const message = ERROR_MESSAGES[errorCode] || 'An error occurred. Please try again.';
+      errorMsg.textContent = message;
+      errorMsg.classList.remove('hidden');
+      window.history.replaceState({}, '', '/signup');
+    }
+  }
+
+  // Run on page load
+  handleErrorParams();
+
   // Show resend option after delay
   function showResendAfterDelay(delayMs: number = 30000): void {
     if (resendTimeoutId) {
