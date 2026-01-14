@@ -99,8 +99,8 @@ import Layout from '../layouts/Layout.astro';
           </div>
         </div>
 
-        <p class="text-sm text-zinc-500">
-          Resets on the 1st of each month
+        <p id="reset-info" class="text-sm text-zinc-500">
+          Loading reset date...
         </p>
       </section>
 
@@ -660,6 +660,26 @@ import Layout from '../layouts/Layout.astro';
 
     if (usageBarContainer) {
       usageBarContainer.setAttribute('aria-valuenow', String(Math.round(percentage)));
+    }
+
+    // Update reset date display based on tier and billing cycle
+    const resetInfo = document.getElementById('reset-info');
+    if (resetInfo) {
+      const tier = userData.tier || 'free';
+      const periodEnd = userData.current_period_end;
+
+      if (tier === 'free' || !periodEnd) {
+        // Free users and legacy paid users: 1st of month
+        resetInfo.textContent = 'Resets on the 1st of each month';
+      } else {
+        // Paid users with billing cycle data
+        const resetDate = new Date(periodEnd * 1000);
+        const formatted = resetDate.toLocaleDateString('en-US', {
+          month: 'long',
+          day: 'numeric',
+        });
+        resetInfo.textContent = `Resets on ${formatted}`;
+      }
     }
   }
 

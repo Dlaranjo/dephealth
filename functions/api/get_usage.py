@@ -41,25 +41,36 @@ def handler(event, context):
         if not user:
             return error_response(401, "invalid_api_key", "Invalid or missing API key")
 
-        # Get authoritative usage from USER_META
+        # Get authoritative usage and billing cycle from USER_META
         table = dynamodb.Table(API_KEYS_TABLE)
         meta_response = table.get_item(
             Key={"pk": user["user_id"], "sk": "USER_META"},
-            ProjectionExpression="requests_this_month",
+            ProjectionExpression="requests_this_month, current_period_end",
         )
 
         # Use USER_META.requests_this_month if available, fall back to per-key for backward compatibility
-        if "Item" in meta_response and "requests_this_month" in meta_response["Item"]:
-            requests_this_month = int(meta_response["Item"]["requests_this_month"])
+        meta_item = meta_response.get("Item", {})
+        if "requests_this_month" in meta_item:
+            requests_this_month = int(meta_item["requests_this_month"])
         else:
             requests_this_month = user["requests_this_month"]
 
-        # Calculate reset date (first of next month)
+        # Get billing cycle end from USER_META or per-key record
+        current_period_end = meta_item.get("current_period_end") or user.get("current_period_end")
+
+        # Calculate reset date based on tier and billing cycle
         now = datetime.now(timezone.utc)
-        if now.month == 12:
-            reset_date = datetime(now.year + 1, 1, 1, tzinfo=timezone.utc)
+        tier = user.get("tier", "free")
+
+        if tier == "free" or not current_period_end:
+            # Free users and legacy paid users: reset on 1st of month
+            if now.month == 12:
+                reset_date = datetime(now.year + 1, 1, 1, tzinfo=timezone.utc)
+            else:
+                reset_date = datetime(now.year, now.month + 1, 1, tzinfo=timezone.utc)
         else:
-            reset_date = datetime(now.year, now.month + 1, 1, tzinfo=timezone.utc)
+            # Paid users with billing data: reset on billing cycle end
+            reset_date = datetime.fromtimestamp(int(current_period_end), tz=timezone.utc)
 
         seconds_until_reset = (reset_date - now).total_seconds()
 

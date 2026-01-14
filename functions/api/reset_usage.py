@@ -2,7 +2,10 @@
 Monthly Usage Reset - Scheduled Lambda
 
 Triggered by EventBridge on the 1st of each month at midnight UTC.
-Resets all users' monthly usage counters.
+Resets FREE tier users' monthly usage counters.
+
+Paid users with billing cycle data are skipped - they reset via invoice.paid webhook.
+Legacy paid users without billing data are still reset here during migration.
 
 Supports resumption via DynamoDB state storage if the Lambda times out.
 Uses per-page checkpointing for reliability.
@@ -26,7 +29,9 @@ RESET_STATE_SK = "monthly_reset"
 
 
 def handler(event, context):
-    """Reset all users' monthly usage counters on 1st of each month.
+    """Reset free tier users' monthly usage counters on 1st of each month.
+
+    Paid users with billing cycle data are skipped - they reset via webhook.
 
     Uses pagination to handle large user bases without timeout.
     Checkpoints after each page for reliable resumption.
@@ -43,9 +48,15 @@ def handler(event, context):
     table_name = os.environ.get("API_KEYS_TABLE", "pkgwatch-api-keys")
     table = dynamodb.Table(table_name)
 
+    # Feature flag for billing cycle reset (allows rollback)
+    billing_cycle_enabled = os.environ.get(
+        "BILLING_CYCLE_RESET_ENABLED", "true"
+    ).lower() == "true"
+
     reset_time = datetime.now(timezone.utc).isoformat()
     reset_month = datetime.now(timezone.utc).strftime("%Y-%m")
     items_processed = 0
+    items_skipped = 0  # Track paid users skipped
     pages_processed = 0
 
     # Check if this is a resume invocation or if we have stored state
@@ -61,10 +72,10 @@ def handler(event, context):
     logger.info(f"Starting monthly usage reset for table {table_name}, month {reset_month}")
 
     while True:
-        # Paginated scan - only need pk, sk for update
+        # Paginated scan - include tier and billing data for skip logic
         # Filter out: SYSTEM# records, PENDING signups, demo# rate limit records
         scan_kwargs = {
-            "ProjectionExpression": "pk, sk",
+            "ProjectionExpression": "pk, sk, tier, current_period_end",
             "FilterExpression": "NOT begins_with(pk, :system) AND NOT begins_with(pk, :demo) AND sk <> :pending",
             "ExpressionAttributeValues": {
                 ":system": "SYSTEM#",
@@ -81,6 +92,17 @@ def handler(event, context):
 
         for item in page_items:
             try:
+                # Check if this is a paid user with billing cycle data
+                tier = item.get("tier", "free")
+                has_billing_data = item.get("current_period_end") is not None
+
+                # Skip paid users with billing data when feature is enabled
+                # They reset via invoice.paid webhook instead
+                if billing_cycle_enabled and tier != "free" and has_billing_data:
+                    items_skipped += 1
+                    continue
+
+                # Reset free users and legacy paid users without billing data
                 table.update_item(
                     Key={"pk": item["pk"], "sk": item["sk"]},
                     UpdateExpression="SET requests_this_month = :zero, last_reset = :now, payment_failures = :zero",
@@ -104,7 +126,10 @@ def handler(event, context):
         if not last_evaluated_key:
             # All done - clear any stored state
             _clear_reset_state(table)
-            logger.info(f"Monthly reset complete: {items_processed} items in {pages_processed} pages")
+            logger.info(
+                f"Monthly reset complete: {items_processed} items reset, "
+                f"{items_skipped} paid users skipped, {pages_processed} pages"
+            )
             break
 
         # Check remaining Lambda time (leave 60s buffer for self-invoke)
@@ -122,9 +147,11 @@ def handler(event, context):
     return {
         "statusCode": 200,
         "items_processed": items_processed,
+        "items_skipped": items_skipped,
         "pages_processed": pages_processed,
         "reset_time": reset_time,
         "reset_month": reset_month,
+        "billing_cycle_enabled": billing_cycle_enabled,
         "completed": last_evaluated_key is None,
     }
 

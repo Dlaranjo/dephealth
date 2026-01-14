@@ -107,6 +107,9 @@ def handler(event, context):
         cancellation_pending = primary_key.get("cancellation_pending", False)
         cancellation_date = primary_key.get("cancellation_date")
 
+        # Get billing cycle end for reset date calculation
+        current_period_end = primary_key.get("current_period_end")
+
         return {
             "statusCode": 200,
             "headers": response_headers,
@@ -120,6 +123,7 @@ def handler(event, context):
                 "last_login": primary_key.get("last_login"),
                 "cancellation_pending": cancellation_pending,
                 "cancellation_date": cancellation_date,
+                "current_period_end": current_period_end,
             }, default=decimal_default),
         }
     except Exception as e:

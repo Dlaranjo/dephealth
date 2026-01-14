@@ -159,6 +159,9 @@ def handler(event, context):
         elif event_type == "invoice.payment_failed":
             _handle_payment_failed(data)
 
+        elif event_type == "invoice.paid":
+            _handle_invoice_paid(data)
+
         else:
             logger.info(f"Unhandled event type: {event_type}")
 
@@ -225,13 +228,20 @@ def _handle_checkout_completed(session: dict):
             logger.warning("No customer email or customer ID in checkout session")
         return
 
-    # Get subscription details to determine tier
+    # Get subscription details to determine tier and billing cycle
     import stripe
     subscription = stripe.Subscription.retrieve(subscription_id)
     price_id = subscription["items"]["data"][0]["price"]["id"]
     tier = PRICE_TO_TIER.get(price_id, "starter")
 
-    logger.info(f"Subscription tier from price {price_id}: {tier}")
+    # Extract billing cycle fields for per-user reset tracking
+    current_period_start = subscription.get("current_period_start")
+    current_period_end = subscription.get("current_period_end")
+
+    logger.info(
+        f"Subscription tier from price {price_id}: {tier}, "
+        f"period={current_period_start}-{current_period_end}"
+    )
 
     # Check if this is an upgrade (existing customer) vs new signup
     is_upgrade = customer_id and _customer_exists(customer_id)
@@ -241,11 +251,20 @@ def _handle_checkout_completed(session: dict):
     # For new customers, use email lookup
     if customer_email:
         # Reset usage on upgrade to give users a fresh start with new limit
-        _update_user_tier(customer_email, tier, customer_id, subscription_id, reset_usage=is_upgrade)
+        _update_user_tier(
+            customer_email, tier, customer_id, subscription_id,
+            reset_usage=is_upgrade,
+            current_period_start=current_period_start,
+            current_period_end=current_period_end,
+        )
     elif customer_id:
         # Existing customer upgrading - lookup by customer ID
         logger.info(f"Upgrading existing customer {customer_id} to {tier}")
-        _update_user_tier_by_customer_id(customer_id, tier)
+        _update_user_tier_by_customer_id(
+            customer_id, tier,
+            current_period_start=current_period_start,
+            current_period_end=current_period_end,
+        )
     else:
         logger.warning("No customer email or customer ID in checkout session")
 
@@ -255,11 +274,12 @@ def _handle_subscription_updated(subscription: dict):
     customer_id = subscription.get("customer")
     status = subscription.get("status")
     cancel_at_period_end = subscription.get("cancel_at_period_end", False)
+    current_period_start = subscription.get("current_period_start")  # Unix timestamp
     current_period_end = subscription.get("current_period_end")  # Unix timestamp
 
     logger.info(
         f"Subscription updated for customer {customer_id}: status={status}, "
-        f"cancel_at_period_end={cancel_at_period_end}"
+        f"cancel_at_period_end={cancel_at_period_end}, period={current_period_start}-{current_period_end}"
     )
 
     # Handle both active and trialing subscriptions
@@ -273,12 +293,14 @@ def _handle_subscription_updated(subscription: dict):
         price_id = items[0].get("price", {}).get("id")
         tier = PRICE_TO_TIER.get(price_id, "starter")
 
-    # Update user with tier and cancellation state
+    # Update user with tier, cancellation state, and billing cycle
     _update_user_subscription_state(
         customer_id=customer_id,
         tier=tier,
         cancellation_pending=cancel_at_period_end,
         cancellation_date=current_period_end if cancel_at_period_end else None,
+        current_period_start=current_period_start,
+        current_period_end=current_period_end,
     )
 
 
@@ -345,12 +367,179 @@ def _handle_payment_failed(invoice: dict):
             logger.info(f"Recorded payment failure {attempt_count} for {item['pk']}")
 
 
+def _handle_invoice_paid(invoice: dict):
+    """Handle successful invoice payment - reset usage for billing cycle renewal.
+
+    This is the PRIMARY trigger for resetting paid user usage counters.
+    Fires when: subscription renews, initial payment succeeds.
+
+    Args:
+        invoice: Stripe invoice object
+    """
+    customer_id = invoice.get("customer")
+    subscription_id = invoice.get("subscription")
+    billing_reason = invoice.get("billing_reason")
+
+    logger.info(
+        f"Invoice paid for customer {customer_id}, "
+        f"subscription={subscription_id}, reason={billing_reason}"
+    )
+
+    if not customer_id:
+        logger.warning("No customer ID in paid invoice")
+        return
+
+    # Only reset for subscription renewals and initial creation
+    # Skip for manual payments, updates, threshold invoices, etc.
+    if billing_reason not in ("subscription_cycle", "subscription_create"):
+        logger.info(f"Skipping usage reset for billing_reason={billing_reason}")
+        return
+
+    # Extract period from invoice lines
+    period_start, period_end = _extract_period_from_invoice(invoice)
+
+    if not period_start or not period_end:
+        logger.warning(
+            f"Could not extract period from invoice for customer {customer_id}"
+        )
+        return
+
+    # Reset usage with idempotency check
+    _reset_user_usage_for_billing_cycle(
+        customer_id=customer_id,
+        period_start=period_start,
+        period_end=period_end,
+    )
+
+
+def _extract_period_from_invoice(invoice: dict) -> tuple[int | None, int | None]:
+    """Extract billing period start/end from invoice lines.
+
+    Args:
+        invoice: Stripe invoice object
+
+    Returns:
+        Tuple of (period_start, period_end) as Unix timestamps, or (None, None)
+    """
+    lines = invoice.get("lines", {}).get("data", [])
+
+    for line in lines:
+        # Look for subscription line items
+        if line.get("type") == "subscription":
+            period = line.get("period", {})
+            return period.get("start"), period.get("end")
+
+    return None, None
+
+
+def _reset_user_usage_for_billing_cycle(
+    customer_id: str,
+    period_start: int,
+    period_end: int,
+):
+    """Reset usage counters for a paid user when billing cycle renews.
+
+    Uses idempotency check via last_reset_period_start to prevent double resets
+    from webhook replays, backup job races, or subscription churn abuse.
+
+    Updates both per-key and USER_META counters for consistency.
+
+    Args:
+        customer_id: Stripe customer ID
+        period_start: Unix timestamp of new billing period start
+        period_end: Unix timestamp of new billing period end
+    """
+    table = dynamodb.Table(API_KEYS_TABLE)
+    reset_time = datetime.now(timezone.utc).isoformat()
+
+    # Query all records for this Stripe customer
+    response = table.query(
+        IndexName="stripe-customer-index",
+        KeyConditionExpression=Key("stripe_customer_id").eq(customer_id),
+    )
+
+    items = response.get("Items", [])
+    if not items:
+        logger.warning(
+            f"No user found for Stripe customer {customer_id} during billing reset"
+        )
+        return
+
+    # Check idempotency - only reset if this is a new period
+    # Use first item to check (all items for same user should have same value)
+    current_last_reset = items[0].get("last_reset_period_start", 0)
+    if period_start <= current_last_reset:
+        logger.info(
+            f"Skipping reset for customer {customer_id} - "
+            f"already reset for period starting {period_start} "
+            f"(last_reset_period_start={current_last_reset})"
+        )
+        return
+
+    user_id = items[0]["pk"]  # Get user_id for USER_META update
+
+    # Reset all API key records
+    reset_count = 0
+    for item in items:
+        # Skip PENDING records
+        if item.get("sk") == "PENDING":
+            continue
+
+        table.update_item(
+            Key={"pk": item["pk"], "sk": item["sk"]},
+            UpdateExpression=(
+                "SET requests_this_month = :zero, "
+                "current_period_start = :period_start, "
+                "current_period_end = :period_end, "
+                "last_reset_period_start = :period_start, "
+                "last_usage_reset = :now"
+            ),
+            ExpressionAttributeValues={
+                ":zero": 0,
+                ":period_start": period_start,
+                ":period_end": period_end,
+                ":now": reset_time,
+            },
+        )
+        reset_count += 1
+
+    # Also reset USER_META (authoritative for rate limiting)
+    try:
+        table.update_item(
+            Key={"pk": user_id, "sk": "USER_META"},
+            UpdateExpression=(
+                "SET requests_this_month = :zero, "
+                "current_period_end = :period_end, "
+                "last_reset_period_start = :period_start, "
+                "last_usage_reset = :now"
+            ),
+            ExpressionAttributeValues={
+                ":zero": 0,
+                ":period_start": period_start,
+                ":period_end": period_end,
+                ":now": reset_time,
+            },
+            ConditionExpression="attribute_exists(pk)",
+        )
+    except ClientError as e:
+        if e.response["Error"]["Code"] != "ConditionalCheckFailedException":
+            raise
+        # USER_META doesn't exist yet - that's OK for users without usage history
+
+    logger.info(
+        f"Reset usage for customer {customer_id}: "
+        f"{reset_count} key records, period={period_start}-{period_end}"
+    )
+
+
 def _update_user_tier(
     email: str,
     tier: str,
     customer_id: str = None,
     subscription_id: str = None,
     reset_usage: bool = False,
+    current_period_start: int = None,
+    current_period_end: int = None,
 ):
     """Update user tier in DynamoDB after successful payment.
 
@@ -362,6 +551,8 @@ def _update_user_tier(
         customer_id: Stripe customer ID
         subscription_id: Stripe subscription ID
         reset_usage: If True, reset requests_this_month to 0 (for upgrades)
+        current_period_start: Unix timestamp of billing period start
+        current_period_end: Unix timestamp of billing period end
     """
     if not email:
         logger.error("Cannot update tier: no email provided")
@@ -406,6 +597,16 @@ def _update_user_tier(
             update_expr += ", stripe_subscription_id = :sub"
             expr_values[":sub"] = subscription_id
 
+        # Store billing cycle fields for per-user reset tracking
+        if current_period_start:
+            update_expr += ", current_period_start = :period_start"
+            expr_values[":period_start"] = current_period_start
+            # Set last_reset_period_start on initial signup (idempotency key)
+            update_expr += ", last_reset_period_start = :period_start"
+        if current_period_end:
+            update_expr += ", current_period_end = :period_end"
+            expr_values[":period_end"] = current_period_end
+
         # Reset payment failures on successful tier update
         update_expr += ", payment_failures = :zero"
         expr_values[":zero"] = 0
@@ -429,10 +630,21 @@ def _update_user_tier(
         logger.info(f"Updated {updated_count} API keys for {email} to tier {tier}")
 
 
-def _update_user_tier_by_customer_id(customer_id: str, tier: str):
+def _update_user_tier_by_customer_id(
+    customer_id: str,
+    tier: str,
+    current_period_start: int = None,
+    current_period_end: int = None,
+):
     """Update tier by Stripe customer ID (for upgrades/downgrades).
 
     Uses stripe-customer-index GSI to find user by Stripe customer ID.
+
+    Args:
+        customer_id: Stripe customer ID
+        tier: New tier name
+        current_period_start: Unix timestamp of billing period start
+        current_period_end: Unix timestamp of billing period end
     """
     if not customer_id:
         logger.error("Cannot update tier: no customer_id provided")
@@ -475,6 +687,16 @@ def _update_user_tier_by_customer_id(customer_id: str, tier: str):
             ":limit": new_limit,
         }
 
+        # Store billing cycle fields for per-user reset tracking
+        if current_period_start:
+            update_expr += ", current_period_start = :period_start"
+            expr_values[":period_start"] = current_period_start
+            # Set last_reset_period_start on initial signup (idempotency key)
+            update_expr += ", last_reset_period_start = :period_start"
+        if current_period_end:
+            update_expr += ", current_period_end = :period_end"
+            expr_values[":period_end"] = current_period_end
+
         # Reset usage on upgrade to give fresh start with new limit
         if is_upgrade:
             update_expr += ", requests_this_month = :zero_usage"
@@ -495,6 +717,8 @@ def _update_user_subscription_state(
     tier: str | None = None,
     cancellation_pending: bool = False,
     cancellation_date: int | None = None,
+    current_period_start: int | None = None,
+    current_period_end: int | None = None,
 ):
     """Update user subscription state including tier and cancellation status.
 
@@ -505,6 +729,8 @@ def _update_user_subscription_state(
         tier: New tier name (if changing)
         cancellation_pending: Whether subscription is set to cancel at period end
         cancellation_date: Unix timestamp of when subscription will end (if canceling)
+        current_period_start: Unix timestamp of billing period start
+        current_period_end: Unix timestamp of billing period end
     """
     if not customer_id:
         logger.error("Cannot update subscription state: no customer_id provided")
@@ -560,6 +786,14 @@ def _update_user_subscription_state(
                 update_expr_parts.append("requests_this_month = :zero_usage")
                 expr_values[":zero_usage"] = 0
                 logger.info(f"Resetting usage for {item['pk']} on tier upgrade to {tier}")
+
+        # Store billing cycle fields for per-user reset tracking
+        if current_period_start:
+            update_expr_parts.append("current_period_start = :period_start")
+            expr_values[":period_start"] = current_period_start
+        if current_period_end:
+            update_expr_parts.append("current_period_end = :period_end")
+            expr_values[":period_end"] = current_period_end
 
         # Update cancellation state
         update_expr_parts.append("cancellation_pending = :cancel_pending")

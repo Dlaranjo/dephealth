@@ -200,14 +200,19 @@ export class ApiStack extends cdk.Stack {
     stripeSecret.grantRead(stripeWebhookHandler);
     stripeWebhookSecret.grantRead(stripeWebhookHandler);
 
-    // Monthly usage reset handler (scheduled)
+    // Monthly usage reset handler (scheduled) - resets FREE tier users
+    // Paid users with billing cycle data are skipped (reset via invoice.paid webhook)
     const resetUsageHandler = new lambda.Function(this, "ResetUsageHandler", {
       ...commonLambdaProps,
       functionName: "pkgwatch-api-reset-usage",
       handler: "api.reset_usage.handler",
       code: apiCodeWithShared,
       timeout: cdk.Duration.minutes(5), // Table scan may take time
-      description: "Reset monthly usage counters on 1st of each month",
+      description: "Reset monthly usage counters on 1st of each month (free tier only)",
+      environment: {
+        ...commonLambdaProps.environment,
+        BILLING_CYCLE_RESET_ENABLED: "true", // Set to "false" to disable per-user billing cycles
+      },
     });
 
     apiKeysTable.grantReadWriteData(resetUsageHandler);
@@ -222,10 +227,41 @@ export class ApiStack extends cdk.Stack {
         month: "*",
         year: "*",
       }),
-      description: "Trigger monthly usage counter reset",
+      description: "Trigger monthly usage counter reset (free tier users)",
     });
 
     resetRule.addTarget(new targets.LambdaFunction(resetUsageHandler));
+
+    // Backup usage reset handler (daily) - catches missed billing cycle resets
+    const backupResetUsageHandler = new lambda.Function(
+      this,
+      "BackupResetUsageHandler",
+      {
+        ...commonLambdaProps,
+        functionName: "pkgwatch-api-backup-reset-usage",
+        handler: "api.reset_usage_backup.handler",
+        code: apiCodeWithShared,
+        timeout: cdk.Duration.minutes(5), // Table scan may take time
+        description: "Daily backup reset for missed billing cycle resets",
+      }
+    );
+
+    apiKeysTable.grantReadWriteData(backupResetUsageHandler);
+
+    // EventBridge rule for daily backup reset at 00:05 UTC
+    const backupResetRule = new events.Rule(this, "DailyBackupUsageReset", {
+      ruleName: "pkgwatch-daily-backup-usage-reset",
+      schedule: events.Schedule.cron({
+        minute: "5",
+        hour: "0",
+        day: "*",
+        month: "*",
+        year: "*",
+      }),
+      description: "Daily backup trigger for missed billing cycle resets",
+    });
+
+    backupResetRule.addTarget(new targets.LambdaFunction(backupResetUsageHandler));
 
     // ===========================================
     // Auth/Signup Handlers
@@ -380,17 +416,12 @@ export class ApiStack extends cdk.Stack {
     });
 
     // Grant SES permissions for email sending
-    // TODO: Remove identity/* wildcard after SES production access is approved
-    // In sandbox mode, SES requires permission to both sender AND recipient identities
     const sesPolicy = new iam.PolicyStatement({
       effect: iam.Effect.ALLOW,
       actions: ["ses:SendEmail", "ses:SendRawEmail"],
       resources: [
         // Domain-level identity allows sending from any address @pkgwatch.laranjo.dev
         `arn:aws:ses:${this.region}:${this.account}:identity/pkgwatch.laranjo.dev`,
-        // Wildcard for verified recipient identities (required in sandbox mode)
-        // REMOVE THIS after production access is granted
-        `arn:aws:ses:${this.region}:${this.account}:identity/*`,
       ],
     });
 
