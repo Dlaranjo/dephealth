@@ -443,6 +443,7 @@ export class ApiStack extends cdk.Stack {
     });
 
     apiKeysTable.grantReadWriteData(verifyHandler);
+    verifyHandler.addToRolePolicy(sessionSecretPolicy);
 
     // POST /auth/magic-link - Send login link
     const magicLinkHandler = new lambda.Function(this, "MagicLinkHandler", {
