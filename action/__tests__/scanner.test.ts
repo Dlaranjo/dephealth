@@ -1,9 +1,9 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { scanDependencies } from "../src/scanner.js";
 import { PkgWatchClient } from "../src/api.js";
 
 // Use vi.hoisted to ensure these are available when vi.mock is executed
-const { mockScan, mockReadDependencies, mockReadDependenciesFromFile, MockDependencyParseError, mockExistsSync, mockStatSync } = vi.hoisted(() => {
+const { mockScan, mockReadDependencies, mockReadDependenciesFromFile, MockDependencyParseError, mockExistsSync, mockStatSync, mockRealpathSync } = vi.hoisted(() => {
   class MockDependencyParseError extends Error {
     constructor(message: string) {
       super(message);
@@ -18,6 +18,7 @@ const { mockScan, mockReadDependencies, mockReadDependenciesFromFile, MockDepend
     MockDependencyParseError,
     mockExistsSync: vi.fn(),
     mockStatSync: vi.fn(),
+    mockRealpathSync: vi.fn(),
   };
 });
 
@@ -31,18 +32,25 @@ vi.mock("../src/api.js", () => ({
   readDependenciesFromFile: (...args: unknown[]) => mockReadDependenciesFromFile(...args),
 }));
 
-// Mock node:fs for existsSync and statSync
+// Mock node:fs for existsSync, statSync, and realpathSync
 vi.mock("node:fs", () => ({
   existsSync: (...args: unknown[]) => mockExistsSync(...args),
   statSync: (...args: unknown[]) => mockStatSync(...args),
+  realpathSync: (...args: unknown[]) => mockRealpathSync(...args),
 }));
 
 describe("scanDependencies", () => {
+  const originalGitHubWorkspace = process.env.GITHUB_WORKSPACE;
+
   beforeEach(() => {
     vi.clearAllMocks();
+    // Set GITHUB_WORKSPACE to /repo for tests using /repo paths
+    process.env.GITHUB_WORKSPACE = "/repo";
     // Default: path exists and is a directory
     mockExistsSync.mockReturnValue(true);
     mockStatSync.mockReturnValue({ isFile: () => false, isDirectory: () => true });
+    // Default: realpathSync returns input unchanged (no symlink)
+    mockRealpathSync.mockImplementation((p: string) => p);
     // Default mock response
     mockScan.mockResolvedValue({
       total: 2,
@@ -55,6 +63,15 @@ describe("scanDependencies", () => {
         { package: "ok-pkg", risk_level: "MEDIUM", health_score: 65 },
       ],
     });
+  });
+
+  afterEach(() => {
+    // Restore original GITHUB_WORKSPACE
+    if (originalGitHubWorkspace === undefined) {
+      delete process.env.GITHUB_WORKSPACE;
+    } else {
+      process.env.GITHUB_WORKSPACE = originalGitHubWorkspace;
+    }
   });
 
   it("reads package.json and returns scan results", async () => {
@@ -91,10 +108,10 @@ describe("scanDependencies", () => {
 
   it("throws error when no dependency file found", async () => {
     mockReadDependencies.mockImplementation(() => {
-      throw new MockDependencyParseError("No dependency file found in /missing");
+      throw new MockDependencyParseError("No dependency file found in /repo/missing");
     });
 
-    await expect(scanDependencies("test-key", "/missing", true)).rejects.toThrow(
+    await expect(scanDependencies("test-key", "/repo/missing", true)).rejects.toThrow(
       "No dependency file found"
     );
   });
@@ -146,11 +163,26 @@ describe("scanDependencies", () => {
 });
 
 describe("scanDependencies - Batch Processing", () => {
+  const originalGitHubWorkspace = process.env.GITHUB_WORKSPACE;
+
   beforeEach(() => {
     vi.clearAllMocks();
+    // Set GITHUB_WORKSPACE to /repo for tests using /repo paths
+    process.env.GITHUB_WORKSPACE = "/repo";
     // Default: path exists and is a directory
     mockExistsSync.mockReturnValue(true);
     mockStatSync.mockReturnValue({ isFile: () => false, isDirectory: () => true });
+    // Default: realpathSync returns input unchanged (no symlink)
+    mockRealpathSync.mockImplementation((p: string) => p);
+  });
+
+  afterEach(() => {
+    // Restore original GITHUB_WORKSPACE
+    if (originalGitHubWorkspace === undefined) {
+      delete process.env.GITHUB_WORKSPACE;
+    } else {
+      process.env.GITHUB_WORKSPACE = originalGitHubWorkspace;
+    }
   });
 
   it("processes dependencies in batches when > 25 packages", async () => {
@@ -273,5 +305,90 @@ describe("scanDependencies - Batch Processing", () => {
 
     // Should only call scan once
     expect(mockScan).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("scanDependencies - Symlink Security", () => {
+  const originalGitHubWorkspace = process.env.GITHUB_WORKSPACE;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    // Clear GITHUB_WORKSPACE so tests use process.cwd()
+    delete process.env.GITHUB_WORKSPACE;
+    mockExistsSync.mockReturnValue(true);
+    mockStatSync.mockReturnValue({ isFile: () => false, isDirectory: () => true });
+    // Default: realpathSync returns input unchanged
+    mockRealpathSync.mockImplementation((p: string) => p);
+    // Reset scan mock to avoid leaking from previous tests
+    mockScan.mockReset();
+  });
+
+  afterEach(() => {
+    // Restore original GITHUB_WORKSPACE
+    if (originalGitHubWorkspace === undefined) {
+      delete process.env.GITHUB_WORKSPACE;
+    } else {
+      process.env.GITHUB_WORKSPACE = originalGitHubWorkspace;
+    }
+  });
+
+  it("rejects symlinks pointing outside workspace", async () => {
+    // Symlink resolves to path outside workspace
+    mockRealpathSync.mockReturnValue("/etc/passwd");
+
+    await expect(
+      scanDependencies("test-key", "./symlink-to-etc", false)
+    ).rejects.toThrow("resolves outside workspace via symlink");
+  });
+
+  it("rejects symlinks using parent directory traversal", async () => {
+    // Symlink resolves to path that escapes via ..
+    const workspace = process.cwd();
+    mockRealpathSync.mockReturnValue(`${workspace}/../secrets/config`);
+
+    await expect(
+      scanDependencies("test-key", "./malicious-link", false)
+    ).rejects.toThrow("resolves outside workspace via symlink");
+  });
+
+  it("allows symlinks within workspace", async () => {
+    const workspace = process.cwd();
+    // Symlink resolves to valid path within workspace
+    mockRealpathSync.mockReturnValue(`${workspace}/actual/nested/package.json`);
+    mockStatSync.mockReturnValue({ isFile: () => true, isDirectory: () => false });
+    mockReadDependenciesFromFile.mockReturnValue({
+      dependencies: { lodash: "^4.0.0" },
+      ecosystem: "npm",
+      format: "package.json",
+      count: 1,
+    });
+    mockScan.mockResolvedValue({
+      total: 1, critical: 0, high: 0, medium: 0, low: 1,
+      packages: [{ package: "lodash", risk_level: "LOW", health_score: 90 }],
+    });
+
+    // Should not throw - symlink is within workspace
+    const result = await scanDependencies("test-key", "./symlink-to-nested", false);
+    expect(result.total).toBe(1);
+  });
+
+  it("handles broken symlinks gracefully", async () => {
+    mockRealpathSync.mockImplementation(() => {
+      throw new Error("ENOENT: no such file or directory");
+    });
+
+    await expect(
+      scanDependencies("test-key", "./broken-link", false)
+    ).rejects.toThrow("Cannot resolve path");
+  });
+
+  it("handles permission denied on symlink resolution", async () => {
+    mockRealpathSync.mockImplementation(() => {
+      throw new Error("EACCES: permission denied");
+    });
+
+    await expect(
+      scanDependencies("test-key", "./protected-link", false)
+    ).rejects.toThrow("Cannot resolve path");
   });
 });

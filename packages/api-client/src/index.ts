@@ -32,6 +32,8 @@ export interface PackageHealthFull extends PackageHealth {
   advisories: string[];
   last_published: string;
   repository_url: string;
+  openssf_checks?: OpenSSFChecks;
+  usage_alert?: UsageAlert;
 }
 
 export type RiskLevel = "LOW" | "MEDIUM" | "HIGH" | "CRITICAL";
@@ -76,6 +78,17 @@ export interface Signals {
   bus_factor_confidence?: "LOW" | "MEDIUM" | "HIGH";
 }
 
+export interface OpenSSFChecks {
+  summary: Record<string, { score: number; status: "pass" | "partial" | "fail" }>;
+  all_checks: Array<{ name: string; score: number; reason: string }>;
+}
+
+export interface UsageAlert {
+  level: "warning" | "critical" | "exceeded";
+  percent: number;
+  message: string;
+}
+
 export interface ScanResult {
   total: number;
   critical: number;
@@ -84,6 +97,7 @@ export interface ScanResult {
   low: number;
   packages: PackageHealth[];
   not_found?: string[];
+  usage_alert?: UsageAlert;
 }
 
 export interface UsageStats {
@@ -98,6 +112,7 @@ export interface UsageStats {
     date: string;
     seconds_until_reset: number;
   };
+  limits_by_tier: Record<string, number>;
 }
 
 export interface ClientOptions {
@@ -347,6 +362,34 @@ export class PkgWatchClient {
    */
   async getUsage(): Promise<UsageStats> {
     return this.request<UsageStats>("/usage");
+  }
+
+  /**
+   * Check API health status.
+   * @returns Object with health status and optional version info
+   */
+  async healthCheck(): Promise<{ healthy: boolean; version?: string }> {
+    try {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 5000);
+
+      const response = await fetch(`${this.baseUrl}/health`, {
+        signal: controller.signal,
+      });
+      clearTimeout(timeoutId);
+
+      if (!response.ok) {
+        return { healthy: false };
+      }
+
+      const data = (await response.json()) as { status?: string; version?: string };
+      return {
+        healthy: data.status === "healthy",
+        version: data.version,
+      };
+    } catch {
+      return { healthy: false };
+    }
   }
 }
 

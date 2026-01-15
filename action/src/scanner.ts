@@ -1,5 +1,5 @@
-import { resolve } from "node:path";
-import { statSync, existsSync } from "node:fs";
+import { resolve, relative, isAbsolute } from "node:path";
+import { statSync, existsSync, realpathSync } from "node:fs";
 import * as core from "@actions/core";
 import {
   PkgWatchClient,
@@ -47,20 +47,38 @@ export async function scanDependencies(
       throw new DependencyParseError(`Path does not exist: ${resolvedPath}`);
     }
 
+    // Resolve symlinks and validate the real path is within workspace
+    let realPath: string;
+    try {
+      realPath = realpathSync(resolvedPath);
+    } catch (err) {
+      const errMsg = err instanceof Error ? err.message : String(err);
+      throw new DependencyParseError(`Cannot resolve path ${resolvedPath}: ${errMsg}`);
+    }
+
+    // Validate resolved path is still within workspace (prevent symlink escape)
+    const workspace = process.env.GITHUB_WORKSPACE || process.cwd();
+    const relativeToWorkspace = relative(workspace, realPath);
+    if (relativeToWorkspace.startsWith("..") || isAbsolute(relativeToWorkspace)) {
+      throw new DependencyParseError(
+        `Path resolves outside workspace via symlink: ${resolvedPath} -> ${realPath}`
+      );
+    }
+
     // Use stat to properly determine if path is a file or directory
-    const stats = statSync(resolvedPath);
+    const stats = statSync(realPath);
     if (stats.isFile()) {
-      const result = readDependenciesFromFile(resolvedPath, includeDev);
+      const result = readDependenciesFromFile(realPath, includeDev);
       dependencies = result.dependencies;
       ecosystem = result.ecosystem;
       format = result.format;
     } else if (stats.isDirectory()) {
-      const result = readDependencies(resolvedPath, includeDev);
+      const result = readDependencies(realPath, includeDev);
       dependencies = result.dependencies;
       ecosystem = result.ecosystem;
       format = result.format;
     } else {
-      throw new DependencyParseError(`Path is not a file or directory: ${resolvedPath}`);
+      throw new DependencyParseError(`Path is not a file or directory: ${realPath}`);
     }
   } catch (err) {
     if (err instanceof DependencyParseError) {

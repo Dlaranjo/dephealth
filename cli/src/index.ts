@@ -315,6 +315,9 @@ program
           console.error(pc.red("Rate limit exceeded."));
           console.error(pc.dim("Your API quota has been exhausted. Try again later or upgrade your plan."));
           console.error(pc.dim("  https://pkgwatch.laranjo.dev/pricing"));
+        } else if (error.code === "forbidden") {
+          console.error(pc.red("Access denied - check your API key permissions."));
+          console.error(pc.dim("Your API key may not have access to this resource."));
         } else {
           console.error(pc.red(`API Error: ${error.message}`));
         }
@@ -601,6 +604,9 @@ program
           console.error(pc.red("Rate limit exceeded."));
           console.error(pc.dim("Your API quota has been exhausted. Try again later or upgrade your plan."));
           console.error(pc.dim("  https://pkgwatch.laranjo.dev/pricing"));
+        } else if (error.code === "forbidden") {
+          console.error(pc.red("Access denied - check your API key permissions."));
+          console.error(pc.dim("Your API key may not have access to this resource."));
         } else {
           console.error(pc.red(`API Error: ${error.message}`));
         }
@@ -657,6 +663,9 @@ program
           console.error(pc.red("Rate limit exceeded."));
           console.error(pc.dim("Your API quota has been exhausted. Try again later or upgrade your plan."));
           console.error(pc.dim("  https://pkgwatch.laranjo.dev/pricing"));
+        } else if (error.code === "forbidden") {
+          console.error(pc.red("Access denied - check your API key permissions."));
+          console.error(pc.dim("Your API key may not have access to this resource."));
         } else {
           console.error(pc.red(`API Error: ${error.message}`));
         }
