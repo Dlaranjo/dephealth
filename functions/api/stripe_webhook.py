@@ -921,6 +921,9 @@ def _update_user_tier(
         if subscription_id:
             update_expr += ", stripe_subscription_id = :sub"
             expr_values[":sub"] = subscription_id
+            # If user has a subscription, they're verified (Stripe verified via payment)
+            update_expr += ", email_verified = :verified"
+            expr_values[":verified"] = True
 
         # Store billing cycle fields for per-user reset tracking
         if current_period_start:
@@ -1004,12 +1007,14 @@ def _update_user_tier_by_customer_id(
                 f"requests (limit: {new_limit}). User is over limit until reset."
             )
 
-        update_expr = "SET tier = :tier, tier_updated_at = :now, payment_failures = :zero, monthly_limit = :limit"
+        # Users with Stripe customer ID are verified (Stripe verified via payment)
+        update_expr = "SET tier = :tier, tier_updated_at = :now, payment_failures = :zero, monthly_limit = :limit, email_verified = :verified"
         expr_values = {
             ":tier": tier,
             ":now": datetime.now(timezone.utc).isoformat(),
             ":zero": 0,
             ":limit": new_limit,
+            ":verified": True,
         }
 
         # Store billing cycle fields for per-user reset tracking
