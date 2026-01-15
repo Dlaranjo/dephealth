@@ -789,3 +789,305 @@ class TestSubscriptionCreated:
         response = table.get_item(Key={"pk": "user_trial", "sk": key_hash})
         item = response.get("Item")
         assert item["tier"] == "pro"
+
+
+class TestUpdateUserTierByCustomerId:
+    """Tests for _update_user_tier_by_customer_id function."""
+
+    @mock_aws
+    def test_updates_tier_by_customer_id(self, mock_dynamodb):
+        """Should update tier for user found by Stripe customer ID."""
+        os.environ["API_KEYS_TABLE"] = "pkgwatch-api-keys"
+
+        table = mock_dynamodb.Table("pkgwatch-api-keys")
+
+        key_hash = hashlib.sha256(b"pw_customer_tier").hexdigest()
+        table.put_item(
+            Item={
+                "pk": "user_custid",
+                "sk": key_hash,
+                "key_hash": key_hash,
+                "email": "custid@example.com",
+                "tier": "free",
+                "stripe_customer_id": "cus_test123",
+                "email_verified": True,
+                "requests_this_month": 100,
+            }
+        )
+
+        from api.stripe_webhook import _update_user_tier_by_customer_id
+
+        _update_user_tier_by_customer_id(
+            customer_id="cus_test123",
+            tier="pro",
+            current_period_start=1704067200,
+            current_period_end=1706745600,
+        )
+
+        response = table.get_item(Key={"pk": "user_custid", "sk": key_hash})
+        item = response.get("Item")
+        assert item["tier"] == "pro"
+        assert item["current_period_start"] == 1704067200
+        assert item["current_period_end"] == 1706745600
+        assert item["payment_failures"] == 0
+
+    @mock_aws
+    def test_returns_early_with_no_customer_id(self, mock_dynamodb):
+        """Should return early when customer_id is empty/None."""
+        os.environ["API_KEYS_TABLE"] = "pkgwatch-api-keys"
+
+        from api.stripe_webhook import _update_user_tier_by_customer_id
+
+        # Should not raise - just returns early
+        _update_user_tier_by_customer_id(customer_id=None, tier="pro")
+        _update_user_tier_by_customer_id(customer_id="", tier="pro")
+
+    @mock_aws
+    def test_handles_no_user_found(self, mock_dynamodb):
+        """Should handle case when no user found for customer ID."""
+        os.environ["API_KEYS_TABLE"] = "pkgwatch-api-keys"
+
+        from api.stripe_webhook import _update_user_tier_by_customer_id
+
+        # Should not raise - logs warning and returns
+        _update_user_tier_by_customer_id(
+            customer_id="cus_nonexistent",
+            tier="pro",
+        )
+
+    @mock_aws
+    def test_resets_usage_on_upgrade(self, mock_dynamodb):
+        """Should reset usage counter when upgrading tier."""
+        os.environ["API_KEYS_TABLE"] = "pkgwatch-api-keys"
+
+        table = mock_dynamodb.Table("pkgwatch-api-keys")
+
+        key_hash = hashlib.sha256(b"pw_upgrade_reset").hexdigest()
+        table.put_item(
+            Item={
+                "pk": "user_upgrade",
+                "sk": key_hash,
+                "key_hash": key_hash,
+                "email": "upgrade@example.com",
+                "tier": "starter",
+                "stripe_customer_id": "cus_upgrade",
+                "email_verified": True,
+                "requests_this_month": 5000,  # At limit for starter
+            }
+        )
+
+        from api.stripe_webhook import _update_user_tier_by_customer_id
+
+        _update_user_tier_by_customer_id(
+            customer_id="cus_upgrade",
+            tier="pro",  # Upgrade from starter to pro
+        )
+
+        response = table.get_item(Key={"pk": "user_upgrade", "sk": key_hash})
+        item = response.get("Item")
+        assert item["tier"] == "pro"
+        assert item["requests_this_month"] == 0  # Reset on upgrade
+
+    @mock_aws
+    def test_warns_on_downgrade_over_limit(self, mock_dynamodb):
+        """Should log warning when downgrading user over new limit."""
+        os.environ["API_KEYS_TABLE"] = "pkgwatch-api-keys"
+
+        table = mock_dynamodb.Table("pkgwatch-api-keys")
+
+        key_hash = hashlib.sha256(b"pw_downgrade_over").hexdigest()
+        table.put_item(
+            Item={
+                "pk": "user_downgrade",
+                "sk": key_hash,
+                "key_hash": key_hash,
+                "email": "downgrade@example.com",
+                "tier": "pro",
+                "stripe_customer_id": "cus_downgrade",
+                "email_verified": True,
+                "requests_this_month": 15000,  # Over starter limit of 5000
+            }
+        )
+
+        from api.stripe_webhook import _update_user_tier_by_customer_id
+
+        _update_user_tier_by_customer_id(
+            customer_id="cus_downgrade",
+            tier="starter",  # Downgrade from pro to starter
+        )
+
+        response = table.get_item(Key={"pk": "user_downgrade", "sk": key_hash})
+        item = response.get("Item")
+        assert item["tier"] == "starter"
+        # Usage NOT reset on downgrade
+        assert item["requests_this_month"] == 15000
+
+
+class TestUpdateUserSubscriptionState:
+    """Tests for _update_user_subscription_state function."""
+
+    @mock_aws
+    def test_updates_cancellation_pending(self, mock_dynamodb):
+        """Should set cancellation_pending flag and date."""
+        os.environ["API_KEYS_TABLE"] = "pkgwatch-api-keys"
+
+        table = mock_dynamodb.Table("pkgwatch-api-keys")
+
+        key_hash = hashlib.sha256(b"pw_cancel_pending").hexdigest()
+        table.put_item(
+            Item={
+                "pk": "user_cancel",
+                "sk": key_hash,
+                "key_hash": key_hash,
+                "email": "cancel@example.com",
+                "tier": "pro",
+                "stripe_customer_id": "cus_cancel",
+                "email_verified": True,
+            }
+        )
+
+        from api.stripe_webhook import _update_user_subscription_state
+
+        cancellation_time = 1706745600  # End of billing period
+
+        _update_user_subscription_state(
+            customer_id="cus_cancel",
+            cancellation_pending=True,
+            cancellation_date=cancellation_time,
+        )
+
+        response = table.get_item(Key={"pk": "user_cancel", "sk": key_hash})
+        item = response.get("Item")
+        assert item["cancellation_pending"] is True
+        assert item["cancellation_date"] == cancellation_time
+
+    @mock_aws
+    def test_clears_cancellation_on_reactivation(self, mock_dynamodb):
+        """Should clear cancellation_date when cancellation_pending is False."""
+        os.environ["API_KEYS_TABLE"] = "pkgwatch-api-keys"
+
+        table = mock_dynamodb.Table("pkgwatch-api-keys")
+
+        key_hash = hashlib.sha256(b"pw_reactivate").hexdigest()
+        table.put_item(
+            Item={
+                "pk": "user_reactivate",
+                "sk": key_hash,
+                "key_hash": key_hash,
+                "email": "reactivate@example.com",
+                "tier": "pro",
+                "stripe_customer_id": "cus_reactivate",
+                "email_verified": True,
+                "cancellation_pending": True,
+                "cancellation_date": 1706745600,
+            }
+        )
+
+        from api.stripe_webhook import _update_user_subscription_state
+
+        _update_user_subscription_state(
+            customer_id="cus_reactivate",
+            cancellation_pending=False,  # User reactivated
+        )
+
+        response = table.get_item(Key={"pk": "user_reactivate", "sk": key_hash})
+        item = response.get("Item")
+        assert item["cancellation_pending"] is False
+        assert item.get("cancellation_date") is None
+
+    @mock_aws
+    def test_returns_early_with_no_customer_id(self, mock_dynamodb):
+        """Should return early when customer_id is empty/None."""
+        os.environ["API_KEYS_TABLE"] = "pkgwatch-api-keys"
+
+        from api.stripe_webhook import _update_user_subscription_state
+
+        # Should not raise
+        _update_user_subscription_state(customer_id=None, cancellation_pending=True)
+        _update_user_subscription_state(customer_id="", cancellation_pending=True)
+
+    @mock_aws
+    def test_handles_no_user_found(self, mock_dynamodb):
+        """Should handle case when no user found for customer ID."""
+        os.environ["API_KEYS_TABLE"] = "pkgwatch-api-keys"
+
+        from api.stripe_webhook import _update_user_subscription_state
+
+        # Should not raise
+        _update_user_subscription_state(
+            customer_id="cus_nonexistent",
+            cancellation_pending=True,
+        )
+
+    @mock_aws
+    def test_updates_tier_and_cancellation_together(self, mock_dynamodb):
+        """Should update both tier and cancellation state in one call."""
+        os.environ["API_KEYS_TABLE"] = "pkgwatch-api-keys"
+
+        table = mock_dynamodb.Table("pkgwatch-api-keys")
+
+        key_hash = hashlib.sha256(b"pw_both").hexdigest()
+        table.put_item(
+            Item={
+                "pk": "user_both",
+                "sk": key_hash,
+                "key_hash": key_hash,
+                "email": "both@example.com",
+                "tier": "free",
+                "stripe_customer_id": "cus_both",
+                "email_verified": True,
+                "requests_this_month": 100,
+            }
+        )
+
+        from api.stripe_webhook import _update_user_subscription_state
+
+        _update_user_subscription_state(
+            customer_id="cus_both",
+            tier="pro",
+            cancellation_pending=False,
+            current_period_start=1704067200,
+            current_period_end=1706745600,
+        )
+
+        response = table.get_item(Key={"pk": "user_both", "sk": key_hash})
+        item = response.get("Item")
+        assert item["tier"] == "pro"
+        assert item["cancellation_pending"] is False
+        assert item["current_period_start"] == 1704067200
+        assert item["current_period_end"] == 1706745600
+        assert item["requests_this_month"] == 0  # Reset on upgrade
+
+    @mock_aws
+    def test_upgrade_resets_usage_via_subscription_state(self, mock_dynamodb):
+        """Should reset usage when upgrading via _update_user_subscription_state."""
+        os.environ["API_KEYS_TABLE"] = "pkgwatch-api-keys"
+
+        table = mock_dynamodb.Table("pkgwatch-api-keys")
+
+        key_hash = hashlib.sha256(b"pw_upgrade_state").hexdigest()
+        table.put_item(
+            Item={
+                "pk": "user_upgrade_state",
+                "sk": key_hash,
+                "key_hash": key_hash,
+                "email": "upgradestate@example.com",
+                "tier": "starter",
+                "stripe_customer_id": "cus_upgrade_state",
+                "email_verified": True,
+                "requests_this_month": 4500,
+            }
+        )
+
+        from api.stripe_webhook import _update_user_subscription_state
+
+        _update_user_subscription_state(
+            customer_id="cus_upgrade_state",
+            tier="business",  # Upgrade from starter to business
+            cancellation_pending=False,
+        )
+
+        response = table.get_item(Key={"pk": "user_upgrade_state", "sk": key_hash})
+        item = response.get("Item")
+        assert item["tier"] == "business"
+        assert item["requests_this_month"] == 0  # Reset on upgrade

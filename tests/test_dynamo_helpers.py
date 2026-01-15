@@ -352,3 +352,268 @@ class TestBatchGetPackages:
         assert len(result) == 1
         assert "exists" in result
         assert "missing" not in result
+
+
+class TestGetPackageRetryBehavior:
+    """Tests for get_package retry behavior on DynamoDB errors."""
+
+    @mock_aws
+    def test_retries_on_throttling_error(self, packages_table):
+        """get_package should retry on ProvisionedThroughputExceededException."""
+        from unittest.mock import patch, MagicMock
+        from botocore.exceptions import ClientError
+        import shared.dynamo as dynamo_module
+        import importlib
+
+        # Reload to get fresh module state
+        importlib.reload(dynamo_module)
+        dynamo_module._dynamodb = None
+
+        # Insert test data first
+        packages_table.put_item(
+            Item={
+                "pk": "npm#retry-test",
+                "sk": "LATEST",
+                "ecosystem": "npm",
+                "name": "retry-test",
+                "health_score": 85,
+            }
+        )
+
+        # Create a mock that fails twice then succeeds
+        call_count = [0]
+        original_get_item = packages_table.get_item
+
+        def mock_get_item(**kwargs):
+            call_count[0] += 1
+            if call_count[0] <= 2:
+                raise ClientError(
+                    {"Error": {"Code": "ProvisionedThroughputExceededException", "Message": "Throttled"}},
+                    "GetItem",
+                )
+            return original_get_item(**kwargs)
+
+        with patch.object(packages_table, "get_item", side_effect=mock_get_item):
+            with patch("shared.dynamo._get_dynamodb") as mock_dynamo:
+                mock_dynamo.return_value.Table.return_value = packages_table
+                with patch("time.sleep"):  # Don't actually sleep in tests
+                    result = dynamo_module.get_package("npm", "retry-test")
+
+        assert result is not None
+        assert result["name"] == "retry-test"
+        assert call_count[0] == 3  # Failed twice, succeeded on third
+
+    @mock_aws
+    def test_returns_none_after_max_retries(self, packages_table):
+        """get_package should return None after max retries exceeded."""
+        from unittest.mock import patch, MagicMock
+        from botocore.exceptions import ClientError
+        import shared.dynamo as dynamo_module
+        import importlib
+
+        importlib.reload(dynamo_module)
+        dynamo_module._dynamodb = None
+
+        # Create mock that always fails with throttling
+        def always_throttle(**kwargs):
+            raise ClientError(
+                {"Error": {"Code": "ProvisionedThroughputExceededException", "Message": "Throttled"}},
+                "GetItem",
+            )
+
+        mock_table = MagicMock()
+        mock_table.get_item = always_throttle
+
+        with patch("shared.dynamo._get_dynamodb") as mock_dynamo:
+            mock_dynamo.return_value.Table.return_value = mock_table
+            with patch("time.sleep"):  # Don't actually sleep
+                result = dynamo_module.get_package("npm", "always-throttled", max_retries=3)
+
+        assert result is None
+
+    @mock_aws
+    def test_no_retry_on_access_denied(self, packages_table):
+        """get_package should not retry on AccessDeniedException."""
+        from unittest.mock import patch, MagicMock
+        from botocore.exceptions import ClientError
+        import shared.dynamo as dynamo_module
+        import importlib
+
+        importlib.reload(dynamo_module)
+        dynamo_module._dynamodb = None
+
+        call_count = [0]
+
+        def access_denied(**kwargs):
+            call_count[0] += 1
+            raise ClientError(
+                {"Error": {"Code": "AccessDeniedException", "Message": "Access Denied"}},
+                "GetItem",
+            )
+
+        mock_table = MagicMock()
+        mock_table.get_item = access_denied
+
+        with patch("shared.dynamo._get_dynamodb") as mock_dynamo:
+            mock_dynamo.return_value.Table.return_value = mock_table
+            result = dynamo_module.get_package("npm", "access-denied")
+
+        assert result is None
+        assert call_count[0] == 1  # Should not retry
+
+    @mock_aws
+    def test_handles_generic_exception(self, packages_table):
+        """get_package should handle non-ClientError exceptions."""
+        from unittest.mock import patch, MagicMock
+        import shared.dynamo as dynamo_module
+        import importlib
+
+        importlib.reload(dynamo_module)
+        dynamo_module._dynamodb = None
+
+        def raise_generic(**kwargs):
+            raise RuntimeError("Something unexpected happened")
+
+        mock_table = MagicMock()
+        mock_table.get_item = raise_generic
+
+        with patch("shared.dynamo._get_dynamodb") as mock_dynamo:
+            mock_dynamo.return_value.Table.return_value = mock_table
+            result = dynamo_module.get_package("npm", "generic-error")
+
+        assert result is None
+
+
+class TestQueryPackagesByTierPagination:
+    """Tests for query_packages_by_tier pagination handling."""
+
+    @mock_aws
+    def test_handles_paginated_results(self, packages_table):
+        """query_packages_by_tier should handle paginated responses."""
+        from unittest.mock import patch, MagicMock
+        import shared.dynamo as dynamo_module
+        import importlib
+
+        importlib.reload(dynamo_module)
+        dynamo_module._dynamodb = None
+
+        # Simulate paginated response
+        page1 = {
+            "Items": [{"pk": "npm#pkg1"}, {"pk": "npm#pkg2"}],
+            "LastEvaluatedKey": {"pk": "npm#pkg2", "tier": 1},
+        }
+        page2 = {
+            "Items": [{"pk": "npm#pkg3"}, {"pk": "npm#pkg4"}],
+            # No LastEvaluatedKey = last page
+        }
+
+        call_count = [0]
+
+        def mock_query(**kwargs):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                return page1
+            return page2
+
+        mock_table = MagicMock()
+        mock_table.query = mock_query
+
+        with patch("shared.dynamo._get_dynamodb") as mock_dynamo:
+            mock_dynamo.return_value.Table.return_value = mock_table
+            result = dynamo_module.query_packages_by_tier(1)
+
+        assert len(result) == 4
+        assert call_count[0] == 2  # Two queries made
+
+
+class TestBatchGetPackagesRetry:
+    """Tests for batch_get_packages UnprocessedKeys handling."""
+
+    @mock_aws
+    def test_handles_unprocessed_keys_with_retry(self, packages_table):
+        """batch_get_packages should retry for UnprocessedKeys."""
+        from unittest.mock import patch, MagicMock
+        import shared.dynamo as dynamo_module
+        import importlib
+
+        importlib.reload(dynamo_module)
+        dynamo_module._dynamodb = None
+
+        # First call returns some unprocessed, second call completes
+        call_count = [0]
+
+        def mock_batch_get(RequestItems):
+            call_count[0] += 1
+            table_name = list(RequestItems.keys())[0]
+            if call_count[0] == 1:
+                return {
+                    "Responses": {
+                        table_name: [
+                            {"pk": "npm#pkg1", "name": "pkg1"},
+                            {"pk": "npm#pkg2", "name": "pkg2"},
+                        ]
+                    },
+                    "UnprocessedKeys": {
+                        table_name: {
+                            "Keys": [{"pk": "npm#pkg3", "sk": "LATEST"}]
+                        }
+                    },
+                }
+            else:
+                return {
+                    "Responses": {
+                        table_name: [{"pk": "npm#pkg3", "name": "pkg3"}]
+                    },
+                    "UnprocessedKeys": {},
+                }
+
+        mock_dynamodb = MagicMock()
+        mock_dynamodb.batch_get_item = mock_batch_get
+        mock_dynamodb.Table.return_value = packages_table
+
+        with patch("shared.dynamo._get_dynamodb", return_value=mock_dynamodb):
+            with patch("time.sleep"):  # Don't actually sleep
+                result = dynamo_module.batch_get_packages("npm", ["pkg1", "pkg2", "pkg3"])
+
+        assert len(result) == 3
+        assert "pkg1" in result
+        assert "pkg2" in result
+        assert "pkg3" in result
+        assert call_count[0] == 2
+
+    @mock_aws
+    def test_stops_after_max_retries_for_unprocessed(self, packages_table):
+        """batch_get_packages should stop after max retries for persistent UnprocessedKeys."""
+        from unittest.mock import patch, MagicMock
+        import shared.dynamo as dynamo_module
+        import importlib
+
+        importlib.reload(dynamo_module)
+        dynamo_module._dynamodb = None
+
+        call_count = [0]
+
+        def always_unprocessed(RequestItems):
+            call_count[0] += 1
+            table_name = list(RequestItems.keys())[0]
+            return {
+                "Responses": {
+                    table_name: [{"pk": "npm#pkg1", "name": "pkg1"}]
+                },
+                "UnprocessedKeys": {
+                    table_name: {
+                        "Keys": [{"pk": "npm#pkg2", "sk": "LATEST"}]
+                    }
+                },
+            }
+
+        mock_dynamodb = MagicMock()
+        mock_dynamodb.batch_get_item = always_unprocessed
+
+        with patch("shared.dynamo._get_dynamodb", return_value=mock_dynamodb):
+            with patch("time.sleep"):  # Don't actually sleep
+                result = dynamo_module.batch_get_packages("npm", ["pkg1", "pkg2"])
+
+        # Should have pkg1 but give up on pkg2 after max retries
+        assert "pkg1" in result
+        assert call_count[0] == 5  # max_retries = 5

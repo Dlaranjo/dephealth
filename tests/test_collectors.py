@@ -725,6 +725,186 @@ class TestGetNpmMetadata:
 
             assert result["has_types"] is True
 
+    def test_get_npm_metadata_invalid_json(self):
+        """Test handling of invalid JSON response from npm registry."""
+        from npm_collector import get_npm_metadata
+
+        def mock_handler(request: httpx.Request) -> httpx.Response:
+            url = str(request.url)
+            if "registry.npmjs.org/bad-json-pkg" in url:
+                # Return invalid JSON
+                return httpx.Response(200, content=b"not valid json {{{")
+            return httpx.Response(404)
+
+        original_init = httpx.AsyncClient.__init__
+
+        def patched_init(self, *args, **kwargs):
+            kwargs["transport"] = create_mock_transport(mock_handler)
+            original_init(self, *args, **kwargs)
+
+        with patch.object(httpx.AsyncClient, "__init__", patched_init):
+            result = run_async(get_npm_metadata("bad-json-pkg"))
+
+            assert result["error"] == "invalid_json_response"
+            assert result["name"] == "bad-json-pkg"
+
+    def test_get_npm_metadata_string_repository(self):
+        """Test handling of repository as string instead of object."""
+        from npm_collector import get_npm_metadata
+
+        def mock_handler(request: httpx.Request) -> httpx.Response:
+            url = str(request.url)
+            if "registry.npmjs.org/string-repo-pkg" in url:
+                return httpx.Response(
+                    200,
+                    json={
+                        "dist-tags": {"latest": "1.0.0"},
+                        "time": {"created": "2023-01-01T00:00:00.000Z"},
+                        "versions": {"1.0.0": {}},
+                        "maintainers": [],
+                        # Repository as string instead of object
+                        "repository": "https://github.com/user/repo",
+                    },
+                )
+            elif "api.npmjs.org/downloads" in url:
+                return httpx.Response(200, json={"downloads": 100})
+            return httpx.Response(404)
+
+        original_init = httpx.AsyncClient.__init__
+
+        def patched_init(self, *args, **kwargs):
+            kwargs["transport"] = create_mock_transport(mock_handler)
+            original_init(self, *args, **kwargs)
+
+        with patch.object(httpx.AsyncClient, "__init__", patched_init):
+            result = run_async(get_npm_metadata("string-repo-pkg"))
+
+            assert result["repository_url"] == "https://github.com/user/repo"
+
+
+class TestNpmDownloadStats:
+    """Tests for npm download statistics functions."""
+
+    def test_get_download_stats_success(self):
+        """Test successful download stats fetch."""
+        from npm_collector import get_download_stats
+
+        def mock_handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                json={
+                    "downloads": 50000,
+                    "start": "2024-01-01",
+                    "end": "2024-01-07",
+                    "package": "test-pkg",
+                },
+            )
+
+        original_init = httpx.AsyncClient.__init__
+
+        def patched_init(self, *args, **kwargs):
+            kwargs["transport"] = create_mock_transport(mock_handler)
+            original_init(self, *args, **kwargs)
+
+        with patch.object(httpx.AsyncClient, "__init__", patched_init):
+            result = run_async(get_download_stats("test-pkg"))
+
+            assert result["downloads"] == 50000
+            assert result["package"] == "test-pkg"
+
+    def test_get_download_stats_error(self):
+        """Test download stats error handling."""
+        from npm_collector import get_download_stats
+
+        def mock_handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(500)
+
+        original_init = httpx.AsyncClient.__init__
+
+        def patched_init(self, *args, **kwargs):
+            kwargs["transport"] = create_mock_transport(mock_handler)
+            original_init(self, *args, **kwargs)
+
+        with patch.object(httpx.AsyncClient, "__init__", patched_init):
+            result = run_async(get_download_stats("failing-pkg"))
+
+            assert result["downloads"] == 0
+            assert result["error"] == "fetch_failed"
+
+    def test_get_bulk_download_stats_unscoped(self):
+        """Test bulk download stats for unscoped packages."""
+        from npm_collector import get_bulk_download_stats
+
+        def mock_handler(request: httpx.Request) -> httpx.Response:
+            url = str(request.url)
+            if "api.npmjs.org/downloads/point/last-week/pkg1,pkg2" in url:
+                return httpx.Response(
+                    200,
+                    json={
+                        "pkg1": {"downloads": 1000},
+                        "pkg2": {"downloads": 2000},
+                    },
+                )
+            return httpx.Response(404)
+
+        original_init = httpx.AsyncClient.__init__
+
+        def patched_init(self, *args, **kwargs):
+            kwargs["transport"] = create_mock_transport(mock_handler)
+            original_init(self, *args, **kwargs)
+
+        with patch.object(httpx.AsyncClient, "__init__", patched_init):
+            result = run_async(get_bulk_download_stats(["pkg1", "pkg2"]))
+
+            assert result["pkg1"] == 1000
+            assert result["pkg2"] == 2000
+
+    def test_get_bulk_download_stats_scoped(self):
+        """Test bulk download stats for scoped packages (fetched individually)."""
+        from npm_collector import get_bulk_download_stats
+
+        def mock_handler(request: httpx.Request) -> httpx.Response:
+            url = str(request.url)
+            if "@scope%2Fpkg" in url or "@scope/pkg" in url:
+                return httpx.Response(200, json={"downloads": 5000})
+            return httpx.Response(404)
+
+        original_init = httpx.AsyncClient.__init__
+
+        def patched_init(self, *args, **kwargs):
+            kwargs["transport"] = create_mock_transport(mock_handler)
+            original_init(self, *args, **kwargs)
+
+        with patch.object(httpx.AsyncClient, "__init__", patched_init):
+            result = run_async(get_bulk_download_stats(["@scope/pkg"]))
+
+            assert result["@scope/pkg"] == 5000
+
+
+class TestBundlephobiaErrorHandling:
+    """Tests for bundlephobia error handling."""
+
+    def test_get_bundle_size_generic_exception(self):
+        """Test generic exception handling in get_bundle_size."""
+        from bundlephobia_collector import get_bundle_size
+
+        def mock_handler(request: httpx.Request) -> httpx.Response:
+            raise RuntimeError("Unexpected error during request")
+
+        original_init = httpx.AsyncClient.__init__
+
+        def patched_init(self, *args, **kwargs):
+            kwargs["transport"] = create_mock_transport(mock_handler)
+            original_init(self, *args, **kwargs)
+
+        with patch.object(httpx.AsyncClient, "__init__", patched_init):
+            result = run_async(get_bundle_size("error-pkg"))
+
+            assert "error" in result
+            assert "fetch_error" in result["error"]
+            assert result["name"] == "error-pkg"
+            assert result["source"] == "bundlephobia"
+
 
 # =============================================================================
 # DEPSDEV COLLECTOR TESTS
