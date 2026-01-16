@@ -69,8 +69,9 @@ import Layout from '../layouts/Layout.astro';
   });
 
   // Store redirect URL for after login (e.g., from /login?redirect=/pricing)
+  // Prevent protocol-relative URLs like //evil.com which would redirect to external sites
   const redirectParam = new URLSearchParams(window.location.search).get('redirect');
-  if (redirectParam && redirectParam.startsWith('/')) {
+  if (redirectParam && /^\/[^\/]/.test(redirectParam)) {
     sessionStorage.setItem('pkgwatch_redirect', redirectParam);
   }
 

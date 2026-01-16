@@ -59,6 +59,10 @@ const {
       img-src 'self' data: https://pkgwatch.laranjo.dev https://*.stripe.com;
       frame-src https://js.stripe.com https://hooks.stripe.com;
       connect-src 'self' https://api.pkgwatch.laranjo.dev https://plausible.io https://api.stripe.com;
+      frame-ancestors 'none';
+      form-action 'self';
+      base-uri 'self';
+      upgrade-insecure-requests;
     " />
 
     <!-- Favicon -->
@@ -68,6 +72,16 @@ const {
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+
+    <!-- Global Error Handler -->
+    <script is:inline>
+      window.addEventListener('error', function(e) {
+        console.error('Uncaught error:', e.error);
+      });
+      window.addEventListener('unhandledrejection', function(e) {
+        console.error('Unhandled promise rejection:', e.reason);
+      });
+    </script>
 
     <!-- Analytics -->
     <script
@@ -84,6 +98,15 @@ const {
     ></script>
   </head>
   <body class="min-h-screen overflow-x-hidden">
+    <noscript>
+      <div style="position:fixed;inset:0;background:#000;z-index:9999;display:flex;align-items:center;justify-content:center;padding:1rem;">
+        <div style="background:#18181b;padding:1.5rem;border-radius:0.5rem;max-width:28rem;text-align:center;">
+          <h1 style="color:#fff;font-size:1.25rem;font-weight:bold;margin-bottom:0.5rem;">JavaScript Required</h1>
+          <p style="color:#a1a1aa;">PkgWatch requires JavaScript to function. Please enable JavaScript in your browser.</p>
+        </div>
+      </div>
+    </noscript>
+
     <!-- Skip to main content link -->
     <a
       href="#main-content"

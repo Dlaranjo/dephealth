@@ -269,6 +269,7 @@ const tiers = [
 
   // State for upgrade modal
   let pendingUpgrade: { tier: string; prorationDate: number } | null = null;
+  let isProcessingUpgrade = false;
 
   // Modal elements
   const upgradeModal = document.getElementById('upgrade-modal');
@@ -378,7 +379,8 @@ const tiers = [
 
   // Confirm and execute the upgrade
   async function confirmUpgrade() {
-    if (!pendingUpgrade) return;
+    if (!pendingUpgrade || isProcessingUpgrade) return;
+    isProcessingUpgrade = true;
 
     if (upgradeConfirmBtn) upgradeConfirmBtn.disabled = true;
     upgradeConfirmText?.classList.add('hidden');
@@ -438,6 +440,7 @@ const tiers = [
       }
       upgradeError?.classList.remove('hidden');
     } finally {
+      isProcessingUpgrade = false;
       if (upgradeConfirmBtn) upgradeConfirmBtn.disabled = false;
       upgradeConfirmText?.classList.remove('hidden');
       upgradeLoading?.classList.add('hidden');

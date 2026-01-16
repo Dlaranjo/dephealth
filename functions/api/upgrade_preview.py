@@ -276,13 +276,12 @@ def handler(event, context):
 
         for line in lines_data:
             amount = line.get("amount", 0)
-            is_proration = line.get("proration", False)
 
-            if is_proration and amount < 0:
-                # Negative proration = credit for unused time on old plan
+            if amount < 0:
+                # Negative amount = credit for unused time on old plan
                 credit_amount += abs(amount)
             else:
-                # Positive amounts (new plan charges, whether proration or full period)
+                # Positive amount = new plan charge
                 new_plan_amount += amount
 
         amount_due = preview.get("amount_due", 0)
