@@ -38,9 +38,6 @@
 
       <!-- Logged-in state (hidden by default) -->
       <div id="nav-cta-user" class="hidden flex items-center gap-3">
-        <span id="nav-user-tier" class="px-2 py-0.5 text-xs rounded-full bg-zinc-500/20 text-zinc-400">
-          Free
-        </span>
         <a href="/dashboard" class="px-4 py-2 bg-emerald-500 hover:bg-emerald-600 text-white text-sm font-medium rounded-lg transition">
           Dashboard
         </a>
@@ -106,9 +103,6 @@
 
       <!-- Logged-in state (hidden by default) -->
       <div id="mobile-cta-user" class="hidden flex flex-col gap-2 pt-2">
-        <span id="mobile-user-tier" class="px-2 py-0.5 text-xs rounded-full bg-zinc-500/20 text-zinc-400 w-fit">
-          Free
-        </span>
         <a
           href="/dashboard"
           class="block w-full text-center px-4 py-2 bg-emerald-500 hover:bg-emerald-600
@@ -129,12 +123,19 @@
 
 <script>
   const API_BASE = 'https://api.pkgwatch.laranjo.dev';
+  const AUTH_CACHE_KEY = 'pkgwatch_auth_cache';
 
-  // Type definitions for global auth state
+  // Type definitions
   interface PkgwatchUser {
     email: string;
     tier: string;
     [key: string]: unknown;
+  }
+
+  interface CachedAuth {
+    isLoggedIn: boolean;
+    user: PkgwatchUser | null;
+    timestamp: number;
   }
 
   interface PkgwatchAuthState {
@@ -149,87 +150,119 @@
     }
   }
 
-  // Tier badge colors (match dashboard)
-  const tierColors: Record<string, string> = {
-    free: 'bg-zinc-500/20 text-zinc-400',
-    starter: 'bg-blue-500/20 text-blue-400',
-    pro: 'bg-emerald-500/20 text-emerald-400',
-    business: 'bg-purple-500/20 text-purple-400',
-  };
+  // Show logged-in UI
+  function showLoggedInUI() {
+    document.getElementById('nav-cta-guest')?.classList.add('hidden');
+    document.getElementById('nav-cta-user')?.classList.remove('hidden');
+    document.getElementById('mobile-cta-guest')?.classList.add('hidden');
+    document.getElementById('mobile-cta-user')?.classList.remove('hidden');
+  }
 
-  async function updateNavAuth() {
+  // Show logged-out UI
+  function showLoggedOutUI() {
+    document.getElementById('nav-cta-guest')?.classList.remove('hidden');
+    document.getElementById('nav-cta-user')?.classList.add('hidden');
+    document.getElementById('mobile-cta-guest')?.classList.remove('hidden');
+    document.getElementById('mobile-cta-user')?.classList.add('hidden');
+  }
+
+  // Get cached auth from sessionStorage
+  function getCachedAuth(): CachedAuth | null {
     try {
-      const response = await fetch(`${API_BASE}/auth/me`, {
-        credentials: 'include',
-      });
+      const cached = sessionStorage.getItem(AUTH_CACHE_KEY);
+      return cached ? JSON.parse(cached) : null;
+    } catch {
+      return null;
+    }
+  }
+
+  // Save auth to sessionStorage
+  function setCachedAuth(isLoggedIn: boolean, user: PkgwatchUser | null) {
+    try {
+      const cache: CachedAuth = { isLoggedIn, user, timestamp: Date.now() };
+      sessionStorage.setItem(AUTH_CACHE_KEY, JSON.stringify(cache));
+    } catch {
+      // sessionStorage unavailable
+    }
+  }
+
+  // Clear cached auth
+  function clearCachedAuth() {
+    try {
+      sessionStorage.removeItem(AUTH_CACHE_KEY);
+    } catch {}
+  }
+
+  // Main auth flow with optimistic rendering
+  async function initAuth() {
+    // 1. Check cache first for instant render (no flash)
+    const cached = getCachedAuth();
+    if (cached?.isLoggedIn) {
+      showLoggedInUI();
+      window.pkgwatchAuth = { isLoggedIn: true, user: cached.user, checked: false };
+      window.dispatchEvent(new CustomEvent('auth-state-changed', {
+        detail: { user: cached.user, fromCache: true }
+      }));
+    }
+
+    // 2. Validate auth in background
+    try {
+      const response = await fetch(`${API_BASE}/auth/me`, { credentials: 'include' });
 
       if (response.ok) {
         const user = await response.json();
-
-        // Store globally for other components (CTA.astro, login.astro, signup.astro)
+        setCachedAuth(true, user);
         window.pkgwatchAuth = { isLoggedIn: true, user, checked: true };
 
-        // Desktop nav
-        document.getElementById('nav-cta-guest')?.classList.add('hidden');
-        document.getElementById('nav-cta-user')?.classList.remove('hidden');
+        // Update UI if we didn't have cache
+        if (!cached?.isLoggedIn) {
+          showLoggedInUI();
+        }
 
-        // Mobile nav
-        document.getElementById('mobile-cta-guest')?.classList.add('hidden');
-        document.getElementById('mobile-cta-user')?.classList.remove('hidden');
-
-        // Update tier badges with color
-        const tier = user.tier || 'free';
-        const tierDisplay = tier.charAt(0).toUpperCase() + tier.slice(1);
-        const colorClass = tierColors[tier] || tierColors.free;
-
-        ['nav-user-tier', 'mobile-user-tier'].forEach(id => {
-          const badge = document.getElementById(id);
-          if (badge) {
-            badge.textContent = tierDisplay;
-            badge.className = `px-2 py-0.5 text-xs rounded-full ${colorClass}`;
-            // Add w-fit for mobile tier badge
-            if (id === 'mobile-user-tier') {
-              badge.classList.add('w-fit');
-            }
-          }
-        });
-
-        // Dispatch event for other components
         window.dispatchEvent(new CustomEvent('auth-state-changed', {
-          detail: { user }
+          detail: { user, fromCache: false }
         }));
       } else {
+        // Not logged in - clear any stale cache
+        clearCachedAuth();
         window.pkgwatchAuth = { isLoggedIn: false, user: null, checked: true };
+
+        // Revert UI if cache was wrong
+        if (cached?.isLoggedIn) {
+          showLoggedOutUI();
+        }
+
         window.dispatchEvent(new CustomEvent('auth-state-changed', {
-          detail: { user: null, isLoggedIn: false }
+          detail: { user: null, fromCache: false }
         }));
       }
-    } catch (e) {
-      window.pkgwatchAuth = { isLoggedIn: false, user: null, checked: true };
+    } catch {
+      // Network error - keep cached state if available
+      window.pkgwatchAuth = {
+        isLoggedIn: cached?.isLoggedIn || false,
+        user: cached?.user || null,
+        checked: true
+      };
       window.dispatchEvent(new CustomEvent('auth-state-changed', {
-        detail: { user: null, isLoggedIn: false }
+        detail: { user: cached?.user || null, fromCache: true }
       }));
     }
   }
 
-  // Logout handlers
+  // Logout - clear cache and redirect
   async function handleLogout() {
+    clearCachedAuth();
     try {
-      await fetch(`${API_BASE}/auth/logout`, {
-        method: 'POST',
-        credentials: 'include',
-      });
-    } catch (e) {
-      // Continue with redirect even if API fails
-    }
+      await fetch(`${API_BASE}/auth/logout`, { method: 'POST', credentials: 'include' });
+    } catch {}
     window.location.href = '/';
   }
 
   document.getElementById('nav-logout-btn')?.addEventListener('click', handleLogout);
   document.getElementById('mobile-logout-btn')?.addEventListener('click', handleLogout);
 
-  // Run auth check
-  updateNavAuth();
+  // Initialize auth
+  initAuth();
 
   // Mobile menu functionality
   const menuBtn = document.getElementById('mobile-menu-btn');

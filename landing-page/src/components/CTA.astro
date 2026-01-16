@@ -55,23 +55,32 @@
   </div>
 
   <script>
+    const AUTH_CACHE_KEY = 'pkgwatch_auth_cache';
+
     function updateCTAAuth(isLoggedIn: boolean) {
       if (isLoggedIn) {
         document.getElementById('cta-guest')?.classList.add('hidden');
         document.getElementById('cta-user')?.classList.remove('hidden');
+      } else {
+        document.getElementById('cta-guest')?.classList.remove('hidden');
+        document.getElementById('cta-user')?.classList.add('hidden');
       }
     }
 
-    // Listen for auth event from Navbar
+    // Check cache immediately for instant render (no flash)
+    const cached = sessionStorage.getItem(AUTH_CACHE_KEY);
+    if (cached) {
+      try {
+        const auth = JSON.parse(cached);
+        if (auth.isLoggedIn) updateCTAAuth(true);
+      } catch {}
+    }
+
+    // Listen for auth events (handles validation updates and cache misses)
     window.addEventListener('auth-state-changed', (e: Event) => {
       const detail = (e as CustomEvent).detail;
       updateCTAAuth(detail?.user != null);
     });
-
-    // Fallback: Check if Navbar already resolved auth (handles race condition)
-    if (window.pkgwatchAuth?.isLoggedIn) {
-      updateCTAAuth(true);
-    }
   </script>
 
   <!-- Pricing Info -->

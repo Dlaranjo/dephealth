@@ -70,27 +70,37 @@ import Layout from '../layouts/Layout.astro';
 
 <script>
   const API_BASE = 'https://api.pkgwatch.laranjo.dev';
+  const AUTH_CACHE_KEY = 'pkgwatch_auth_cache';
 
-  // Handle auth state from Navbar (avoids duplicate auth request)
-  function handleAuthState(isLoggedIn: boolean) {
-    if (isLoggedIn) {
-      // Already logged in - redirect to dashboard
-      window.location.href = '/dashboard';
-    } else {
-      // Not logged in - show the form
-      document.getElementById('signup-content')?.classList.remove('opacity-0');
-    }
+  // Check cache first for instant redirect (no flash)
+  const cached = sessionStorage.getItem(AUTH_CACHE_KEY);
+  if (cached) {
+    try {
+      const auth = JSON.parse(cached);
+      if (auth.isLoggedIn) {
+        // Hide everything during redirect to prevent any flash
+        document.body.style.visibility = 'hidden';
+        window.location.href = '/dashboard';
+      }
+    } catch {}
   }
 
-  // Listen for auth event from Navbar
+  // Listen for auth validation from Navbar
   window.addEventListener('auth-state-changed', (e: Event) => {
     const detail = (e as CustomEvent).detail;
-    handleAuthState(detail?.user != null);
+    if (detail?.user && !detail?.fromCache) {
+      // Validated as logged in - redirect
+      document.body.style.visibility = 'hidden';
+      window.location.href = '/dashboard';
+    } else if (!detail?.user && !detail?.fromCache) {
+      // Validated as logged out - show form
+      document.getElementById('signup-content')?.classList.remove('opacity-0');
+    }
   });
 
-  // Fallback: Check if Navbar already resolved auth (handles race condition)
-  if (window.pkgwatchAuth?.checked) {
-    handleAuthState(window.pkgwatchAuth.isLoggedIn);
+  // If no cache, wait for validation then show form
+  if (!cached && window.pkgwatchAuth?.checked && !window.pkgwatchAuth.isLoggedIn) {
+    document.getElementById('signup-content')?.classList.remove('opacity-0');
   }
 
   const form = document.getElementById('signup-form');
