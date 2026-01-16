@@ -37,7 +37,8 @@ export class ApiStack extends cdk.Stack {
     // Stripe Environment Variable Validation
     // ===========================================
     // Validate required Stripe price IDs at synth time for production deployments
-    const isProduction = process.env.CDK_ENV !== "dev";
+    // Skip validation for dev and ci environments
+    const isProduction = !["dev", "ci"].includes(process.env.CDK_ENV || "");
     if (isProduction) {
       const requiredStripeVars = [
         "STRIPE_PRICE_STARTER",
