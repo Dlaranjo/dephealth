@@ -150,14 +150,8 @@ def handler(event, context):
             origin=origin,
         )
 
-    price_id = TIER_TO_PRICE[tier]
-    if not price_id:
-        logger.error(f"Price ID not configured for tier: {tier}")
-        return error_response(
-            500, "price_not_configured", "Pricing not configured for this tier", origin=origin
-        )
-
-    # Get user's current tier and existing Stripe customer ID
+    # Get user's current tier and existing Stripe customer ID FIRST
+    # (so existing subscribers get directed to upgrade flow before price check)
     table = dynamodb.Table(API_KEYS_TABLE)
     response = table.query(
         IndexName="email-index",
@@ -185,6 +179,14 @@ def handler(event, context):
             "upgrade_required",
             "Use /upgrade/preview and /upgrade/confirm for subscription upgrades with proration",
             origin=origin,
+        )
+
+    # Now check if price is configured (only matters for new subscriptions)
+    price_id = TIER_TO_PRICE[tier]
+    if not price_id:
+        logger.error(f"Price ID not configured for tier: {tier}")
+        return error_response(
+            500, "price_not_configured", "Pricing not configured for this tier", origin=origin
         )
 
     # Prevent downgrade via checkout (should use customer portal instead)

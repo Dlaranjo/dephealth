@@ -265,12 +265,25 @@ def handler(event, context):
         credit_amount = 0
         new_plan_amount = 0
 
-        for line in preview.get("lines", {}).get("data", []):
-            if line.get("proration"):
-                # Proration lines are typically negative (credit for unused time)
-                credit_amount += abs(line.get("amount", 0))
+        # Log line items for debugging
+        lines_data = preview.get("lines", {}).get("data", [])
+        logger.info(f"Invoice preview has {len(lines_data)} line items")
+        for i, line in enumerate(lines_data):
+            logger.info(
+                f"Line {i}: amount={line.get('amount')}, proration={line.get('proration')}, "
+                f"type={line.get('type')}, description={line.get('description', '')[:50]}"
+            )
+
+        for line in lines_data:
+            amount = line.get("amount", 0)
+            is_proration = line.get("proration", False)
+
+            if is_proration and amount < 0:
+                # Negative proration = credit for unused time on old plan
+                credit_amount += abs(amount)
             else:
-                new_plan_amount += line.get("amount", 0)
+                # Positive amounts (new plan charges, whether proration or full period)
+                new_plan_amount += amount
 
         amount_due = preview.get("amount_due", 0)
         currency = preview.get("currency", "usd")
@@ -289,7 +302,8 @@ def handler(event, context):
 
         logger.info(
             f"Generated upgrade preview for user {user_id}: "
-            f"{current_tier} -> {tier}, amount_due: {amount_due}"
+            f"{current_tier} -> {tier}, amount_due: {amount_due}, "
+            f"credit_calculated: {credit_amount}, new_plan_calculated: {new_plan_amount}"
         )
 
         return success_response({
