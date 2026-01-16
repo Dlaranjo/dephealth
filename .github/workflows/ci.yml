@@ -105,29 +105,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Scan monorepo dependencies
+      - name: Scan all dependencies (recursive)
         uses: ./action
         with:
           api-key: ${{ secrets.PKGWATCH_API_KEY }}
-          working-directory: '.'
-          include-dev: 'true'
-          soft-fail: 'true'
-        continue-on-error: true
-
-      - name: Scan infrastructure dependencies
-        uses: ./action
-        with:
-          api-key: ${{ secrets.PKGWATCH_API_KEY }}
-          working-directory: 'infrastructure'
-          include-dev: 'true'
-          soft-fail: 'true'
-        continue-on-error: true
-
-      - name: Scan landing page dependencies
-        uses: ./action
-        with:
-          api-key: ${{ secrets.PKGWATCH_API_KEY }}
-          working-directory: 'landing-page'
+          scan-mode: 'recursive'
           include-dev: 'true'
           soft-fail: 'true'
         continue-on-error: true
