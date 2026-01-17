@@ -95,7 +95,7 @@ import Layout from '../layouts/Layout.astro';
             <span id="usage-count" class="text-white font-medium">0 / 100</span>
           </div>
           <div class="h-2 bg-zinc-800 rounded-full overflow-hidden" role="progressbar" aria-valuenow="0" aria-valuemin="0" aria-valuemax="100" id="usage-bar-container">
-            <div id="usage-bar" class="h-full bg-emerald-500 rounded-full transition-all duration-500" style="width: 0%"></div>
+            <div id="usage-bar" class="h-full bg-blue-500 rounded-full transition-all duration-500" style="width: 0%"></div>
           </div>
         </div>
 
@@ -674,13 +674,13 @@ import Layout from '../layouts/Layout.astro';
       usageBar.style.width = `${percentage}%`;
 
       // Color coding for usage levels
-      usageBar.classList.remove('bg-emerald-500', 'bg-yellow-500', 'bg-red-500');
+      usageBar.classList.remove('bg-blue-500', 'bg-yellow-500', 'bg-red-500');
       if (percentage >= 90) {
         usageBar.classList.add('bg-red-500');
       } else if (percentage >= 75) {
         usageBar.classList.add('bg-yellow-500');
       } else {
-        usageBar.classList.add('bg-emerald-500');
+        usageBar.classList.add('bg-blue-500');
       }
     }
 
