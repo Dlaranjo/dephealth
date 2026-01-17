@@ -159,7 +159,7 @@ jobs:
         run: |
           for i in {1..5}; do
             echo "Health check attempt $i of 5..."
-            if curl -sf --max-time 10 https://api.pkgwatch.laranjo.dev/v1/health | jq -e '.status == "healthy"'; then
+            if curl -sf --max-time 10 https://api.pkgwatch.laranjo.dev/health | jq -e '.status == "healthy"'; then
               echo "Health check passed"
               exit 0
             fi
@@ -177,7 +177,7 @@ jobs:
           echo "Running smoke test on lodash package..."
           for i in {1..3}; do
             echo "Smoke test attempt $i of 3..."
-            response=$(curl -sf --max-time 15 https://api.pkgwatch.laranjo.dev/v1/packages/npm/lodash) && {
+            response=$(curl -sf --max-time 15 https://api.pkgwatch.laranjo.dev/packages/npm/lodash) && {
               echo "$response" | jq -e '.health_score | type == "number"' > /dev/null && {
                 echo "Smoke test passed"
                 exit 0
