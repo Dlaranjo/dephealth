@@ -328,6 +328,224 @@ class TestGitHubCollector:
             assert result["commits_90d"] == 0
             assert result["active_contributors_90d"] == 0
 
+    def test_days_since_commit_fallback_to_pushed_at(self):
+        """When commits list is empty but pushed_at exists, should use pushed_at."""
+        from github_collector import GitHubCollector
+
+        # pushed_at is 120 days ago (outside 90-day commit window)
+        pushed_at_date = (datetime.now(timezone.utc) - timedelta(days=120)).isoformat()
+
+        def mock_handler(request: httpx.Request) -> httpx.Response:
+            url = str(request.url)
+            if "/commits" in url:
+                return httpx.Response(200, json=[])  # No commits in 90-day window
+            elif "/contributors" in url:
+                return httpx.Response(200, json=[{"login": "dev", "contributions": 100}])
+            elif "/issues" in url:
+                return httpx.Response(200, json=[])
+            elif "/pulls" in url:
+                return httpx.Response(200, json=[])
+            elif "/repos/stable/package" in url:
+                return httpx.Response(200, json={
+                    "stargazers_count": 1000,
+                    "forks_count": 100,
+                    "open_issues_count": 5,
+                    "watchers_count": 1000,
+                    "pushed_at": pushed_at_date,
+                    "updated_at": pushed_at_date,
+                    "created_at": "2020-01-01T00:00:00Z",
+                    "archived": False,
+                    "disabled": False,
+                    "default_branch": "main",
+                })
+            return httpx.Response(404)
+
+        original_init = httpx.AsyncClient.__init__
+
+        def patched_init(self, *args, **kwargs):
+            kwargs["transport"] = create_mock_transport(mock_handler)
+            original_init(self, *args, **kwargs)
+
+        with patch.object(httpx.AsyncClient, "__init__", patched_init):
+            collector = GitHubCollector(token="ghp_test_token")
+            result = run_async(collector.get_repo_metrics("stable", "package"))
+
+            # Should use pushed_at (120 days), NOT default to 999
+            assert result["days_since_last_commit"] == 120
+            assert result["commits_90d"] == 0
+
+    def test_days_since_commit_999_when_no_pushed_at(self):
+        """When both commits and pushed_at are unavailable, should use 999."""
+        from github_collector import GitHubCollector
+
+        def mock_handler(request: httpx.Request) -> httpx.Response:
+            url = str(request.url)
+            if "/commits" in url:
+                return httpx.Response(200, json=[])
+            elif "/contributors" in url:
+                return httpx.Response(200, json=[])
+            elif "/issues" in url:
+                return httpx.Response(200, json=[])
+            elif "/pulls" in url:
+                return httpx.Response(200, json=[])
+            elif "/repos/unknown/repo" in url:
+                return httpx.Response(200, json={
+                    "stargazers_count": 0,
+                    "forks_count": 0,
+                    "open_issues_count": 0,
+                    "watchers_count": 0,
+                    # No pushed_at field
+                    "archived": False,
+                    "disabled": False,
+                    "default_branch": "main",
+                })
+            return httpx.Response(404)
+
+        original_init = httpx.AsyncClient.__init__
+
+        def patched_init(self, *args, **kwargs):
+            kwargs["transport"] = create_mock_transport(mock_handler)
+            original_init(self, *args, **kwargs)
+
+        with patch.object(httpx.AsyncClient, "__init__", patched_init):
+            collector = GitHubCollector(token="ghp_test_token")
+            result = run_async(collector.get_repo_metrics("unknown", "repo"))
+
+            assert result["days_since_last_commit"] == 999
+
+    def test_days_since_commit_from_recent_commits(self):
+        """When commits exist in 90-day window, should use commit date."""
+        from github_collector import GitHubCollector
+
+        # Commit is 7 days ago
+        commit_date = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
+        # pushed_at is older (30 days) - should be ignored
+        pushed_at_date = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
+
+        def mock_handler(request: httpx.Request) -> httpx.Response:
+            url = str(request.url)
+            if "/commits" in url:
+                return httpx.Response(200, json=[{
+                    "author": {"login": "dev"},
+                    "commit": {"author": {"date": commit_date}},
+                }])
+            elif "/contributors" in url:
+                return httpx.Response(200, json=[{"login": "dev", "contributions": 100}])
+            elif "/issues" in url:
+                return httpx.Response(200, json=[])
+            elif "/pulls" in url:
+                return httpx.Response(200, json=[])
+            elif "/repos/active/repo" in url:
+                return httpx.Response(200, json={
+                    "stargazers_count": 1000,
+                    "forks_count": 100,
+                    "open_issues_count": 5,
+                    "watchers_count": 1000,
+                    "pushed_at": pushed_at_date,
+                    "updated_at": commit_date,
+                    "created_at": "2020-01-01T00:00:00Z",
+                    "archived": False,
+                    "disabled": False,
+                    "default_branch": "main",
+                })
+            return httpx.Response(404)
+
+        original_init = httpx.AsyncClient.__init__
+
+        def patched_init(self, *args, **kwargs):
+            kwargs["transport"] = create_mock_transport(mock_handler)
+            original_init(self, *args, **kwargs)
+
+        with patch.object(httpx.AsyncClient, "__init__", patched_init):
+            collector = GitHubCollector(token="ghp_test_token")
+            result = run_async(collector.get_repo_metrics("active", "repo"))
+
+            # Should use commit date (7 days), not pushed_at (30 days)
+            assert result["days_since_last_commit"] == 7
+
+    def test_days_since_commit_future_pushed_at_clamped(self):
+        """Future pushed_at date should be clamped to 0."""
+        from github_collector import GitHubCollector
+
+        # Future date (shouldn't happen but defensive)
+        future_date = (datetime.now(timezone.utc) + timedelta(days=30)).isoformat()
+
+        def mock_handler(request: httpx.Request) -> httpx.Response:
+            url = str(request.url)
+            if "/commits" in url:
+                return httpx.Response(200, json=[])
+            elif "/contributors" in url:
+                return httpx.Response(200, json=[])
+            elif "/issues" in url:
+                return httpx.Response(200, json=[])
+            elif "/pulls" in url:
+                return httpx.Response(200, json=[])
+            elif "/repos/future/repo" in url:
+                return httpx.Response(200, json={
+                    "stargazers_count": 0,
+                    "forks_count": 0,
+                    "open_issues_count": 0,
+                    "watchers_count": 0,
+                    "pushed_at": future_date,
+                    "archived": False,
+                    "disabled": False,
+                    "default_branch": "main",
+                })
+            return httpx.Response(404)
+
+        original_init = httpx.AsyncClient.__init__
+
+        def patched_init(self, *args, **kwargs):
+            kwargs["transport"] = create_mock_transport(mock_handler)
+            original_init(self, *args, **kwargs)
+
+        with patch.object(httpx.AsyncClient, "__init__", patched_init):
+            collector = GitHubCollector(token="ghp_test_token")
+            result = run_async(collector.get_repo_metrics("future", "repo"))
+
+            # Future date should be clamped to 0
+            assert result["days_since_last_commit"] == 0
+
+    def test_days_since_commit_malformed_pushed_at(self):
+        """Malformed pushed_at date should fall back to 999."""
+        from github_collector import GitHubCollector
+
+        def mock_handler(request: httpx.Request) -> httpx.Response:
+            url = str(request.url)
+            if "/commits" in url:
+                return httpx.Response(200, json=[])
+            elif "/contributors" in url:
+                return httpx.Response(200, json=[])
+            elif "/issues" in url:
+                return httpx.Response(200, json=[])
+            elif "/pulls" in url:
+                return httpx.Response(200, json=[])
+            elif "/repos/malformed/repo" in url:
+                return httpx.Response(200, json={
+                    "stargazers_count": 0,
+                    "forks_count": 0,
+                    "open_issues_count": 0,
+                    "watchers_count": 0,
+                    "pushed_at": "not-a-valid-date",  # Invalid date format
+                    "archived": False,
+                    "disabled": False,
+                    "default_branch": "main",
+                })
+            return httpx.Response(404)
+
+        original_init = httpx.AsyncClient.__init__
+
+        def patched_init(self, *args, **kwargs):
+            kwargs["transport"] = create_mock_transport(mock_handler)
+            original_init(self, *args, **kwargs)
+
+        with patch.object(httpx.AsyncClient, "__init__", patched_init):
+            collector = GitHubCollector(token="ghp_test_token")
+            result = run_async(collector.get_repo_metrics("malformed", "repo"))
+
+            # Malformed date should fall back to 999
+            assert result["days_since_last_commit"] == 999
+
 
 class TestTrueBusFactor:
     """Tests for true bus factor calculation."""

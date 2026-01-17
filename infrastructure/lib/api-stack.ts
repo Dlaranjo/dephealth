@@ -166,10 +166,17 @@ export class ApiStack extends cdk.Stack {
       memorySize: 1024, // Increased from 512 - heavy batch operations need more resources
       description: "Scan package.json for health scores",
       // Note: Removed reservedConcurrentExecutions to avoid account limit issues
+      environment: {
+        ...commonLambdaProps.environment,
+        PACKAGE_QUEUE_URL: packageQueue?.queueUrl ?? "",
+      },
     });
 
     packagesTable.grantReadData(scanHandler);
     apiKeysTable.grantReadWriteData(scanHandler);
+    if (packageQueue) {
+      packageQueue.grantSendMessages(scanHandler);
+    }
 
     // Get usage handler
     const getUsageHandler = new lambda.Function(this, "GetUsageHandler", {

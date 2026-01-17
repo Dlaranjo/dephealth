@@ -9,6 +9,7 @@ import json
 import logging
 import os
 import random
+import re
 import time
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -17,6 +18,83 @@ import boto3
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
+
+# SQS client (lazy initialization)
+_sqs = None
+PACKAGE_QUEUE_URL = os.environ.get("PACKAGE_QUEUE_URL")
+MAX_QUEUE_PER_SCAN = 50  # Prevent abuse - max packages to queue per scan
+
+# Valid package name patterns
+NPM_PACKAGE_PATTERN = re.compile(r'^(@[a-z0-9-~][a-z0-9-._~]*/)?[a-z0-9-~][a-z0-9-._~]*$')
+PYPI_PACKAGE_PATTERN = re.compile(r'^[a-zA-Z0-9]([a-zA-Z0-9._-]*[a-zA-Z0-9])?$')
+
+
+def _get_sqs():
+    """Lazy initialization of SQS client."""
+    global _sqs
+    if _sqs is None:
+        _sqs = boto3.client("sqs")
+    return _sqs
+
+
+def _is_valid_package_name(name: str, ecosystem: str) -> bool:
+    """Validate package name format before queueing."""
+    if not name or not isinstance(name, str):
+        return False
+    # Defense-in-depth: check for path traversal
+    if ".." in name or name.startswith("/"):
+        return False
+    if ecosystem == "npm":
+        return bool(NPM_PACKAGE_PATTERN.match(name)) and len(name) <= 214
+    elif ecosystem == "pypi":
+        return bool(PYPI_PACKAGE_PATTERN.match(name)) and len(name) <= 128  # Match collector
+    return False
+
+
+def _queue_packages_for_collection(packages: list[str], ecosystem: str) -> int:
+    """
+    Queue validated packages for async collection.
+
+    Returns count of packages successfully queued.
+    """
+    if not PACKAGE_QUEUE_URL or not packages:
+        return 0
+
+    # Validate and limit
+    valid_packages = [p for p in packages if _is_valid_package_name(p, ecosystem)]
+    to_queue = valid_packages[:MAX_QUEUE_PER_SCAN]
+
+    if not to_queue:
+        return 0
+
+    sqs = _get_sqs()
+    queued = 0
+
+    # Send in batches of 10 (SQS limit)
+    for i in range(0, len(to_queue), 10):
+        batch = to_queue[i:i + 10]
+        entries = [
+            {
+                "Id": str(j),
+                "MessageBody": json.dumps({
+                    "ecosystem": ecosystem,
+                    "name": name,
+                    "tier": 3,  # Low priority for discovered packages
+                    "reason": "scan_discovery",
+                }),
+            }
+            for j, name in enumerate(batch)
+        ]
+        try:
+            sqs.send_message_batch(QueueUrl=PACKAGE_QUEUE_URL, Entries=entries)
+            queued += len(batch)
+        except Exception as e:
+            logger.error(f"Failed to queue packages for collection: {e}")
+
+    if queued > 0:
+        logger.info(f"Queued {queued} packages for collection (ecosystem={ecosystem})")
+
+    return queued
 
 # Import from shared module (bundled with Lambda)
 from shared.auth import validate_api_key, check_and_increment_usage_batch
@@ -208,6 +286,11 @@ def handler(event, context):
     # Usage was already atomically reserved at the start of the request
     # based on len(dependencies) - this prevents race conditions
 
+    # Queue not-found packages for async collection (if SQS configured)
+    queued_count = 0
+    if not_found:
+        queued_count = _queue_packages_for_collection(not_found, ecosystem)
+
     # Calculate counts by risk level
     critical_count = sum(1 for r in results if r["risk_level"] == "CRITICAL")
     high_count = sum(1 for r in results if r["risk_level"] == "HIGH")
@@ -240,6 +323,14 @@ def handler(event, context):
         "packages": results,
         "not_found": not_found,
     }
+
+    # Add discovery info if packages were queued for collection
+    if queued_count > 0:
+        response_body["discovery"] = {
+            "queued": queued_count,
+            "skipped": len(not_found) - queued_count,
+            "message": f"{queued_count} package(s) queued for collection. Re-scan later for results.",
+        }
 
     if alert:
         response_headers["X-Usage-Alert"] = alert["level"]

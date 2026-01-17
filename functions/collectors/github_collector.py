@@ -313,7 +313,10 @@ class GitHubCollector:
                 commits_90d_non_bot = len(non_bot_commits)
 
             # Days since last commit
-            days_since_commit = 999
+            # Primary: most recent commit from 90-day window
+            # Fallback: pushed_at from repo metadata (covers commits older than 90 days)
+            days_since_commit = None
+
             if commits and isinstance(commits, list) and len(commits) > 0:
                 first_commit = commits[0]
                 if isinstance(first_commit, dict):
@@ -329,16 +332,40 @@ class GitHubCollector:
                             days_since_commit = (
                                 datetime.now(timezone.utc) - last_commit
                             ).days
-                            # Clamp at source - future dates should not produce negative days
-                            if days_since_commit < 0:
-                                logger.warning(
-                                    f"Future commit date detected for {owner}/{repo}, "
-                                    f"clamping days_since_commit to 0"
-                                )
-                                days_since_commit = 0
                             days_since_commit = max(0, days_since_commit)
                         except ValueError as e:
                             logger.warning(f"Could not parse commit date: {e}")
+
+            # Fallback: Use pushed_at from repo metadata when no commits in 90-day window
+            if days_since_commit is None:
+                pushed_at = repo_data.get("pushed_at")
+                if pushed_at:
+                    try:
+                        pushed_date = datetime.fromisoformat(
+                            pushed_at.replace("Z", "+00:00")
+                        )
+                        # Handle naive datetimes (defensive)
+                        if pushed_date.tzinfo is None:
+                            pushed_date = pushed_date.replace(tzinfo=timezone.utc)
+                        days_since_commit = (
+                            datetime.now(timezone.utc) - pushed_date
+                        ).days
+                        days_since_commit = max(0, days_since_commit)
+                        logger.debug(
+                            f"Using pushed_at fallback for {owner}/{repo}: "
+                            f"{days_since_commit} days (no commits in 90-day window)"
+                        )
+                    except (ValueError, TypeError) as e:
+                        logger.warning(
+                            f"Could not parse pushed_at date '{pushed_at}': {e}"
+                        )
+
+            # Final fallback: truly unknown
+            if days_since_commit is None:
+                days_since_commit = 999
+                logger.info(
+                    f"No commit activity data for {owner}/{repo}, using 999 days"
+                )
 
             # Calculate issue response time
             # NOTE: This uses heuristic estimation rather than actual response times
