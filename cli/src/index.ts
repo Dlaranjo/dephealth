@@ -10,7 +10,11 @@
  */
 
 import { program, Option } from "commander";
-import pc from "picocolors";
+import picocolors from "picocolors";
+
+// Use mutable binding so we can swap to no-color version
+// Type as ReturnType of createColors since that's what we'll assign
+let pc: ReturnType<typeof picocolors.createColors> = picocolors;
 import ora, { type Ora } from "ora";
 import cliProgress from "cli-progress";
 import { resolve as resolvePath, relative as relativePath, basename } from "node:path";
@@ -24,8 +28,11 @@ const EXIT_RISK_EXCEEDED = 1;
 const EXIT_CLI_ERROR = 2;
 
 // Global unhandled rejection handler to prevent silent crashes
+// Check NO_COLOR directly since pc might not be updated yet (preAction hasn't run)
 process.on("unhandledRejection", (error) => {
-  console.error(pc.red("Unexpected error:"), error instanceof Error ? error.message : String(error));
+  const useColor = !process.env.NO_COLOR;
+  const red = useColor ? pc.red : (s: string) => s;
+  console.error(red("Unexpected error:"), error instanceof Error ? error.message : String(error));
   process.exit(EXIT_CLI_ERROR);
 });
 
@@ -278,10 +285,17 @@ program
   .version(VERSION)
   .option("-q, --quiet", "Suppress non-essential output")
   .option("-v, --verbose", "Show detailed output")
+  .option("--no-color", "Disable colored output (also respects NO_COLOR env)")
   .hook("preAction", (thisCommand) => {
     const opts = thisCommand.opts();
     quietMode = opts.quiet ?? false;
     verboseMode = opts.verbose ?? false;
+
+    // Handle --no-color flag (Commander sets opts.color = false for --no-color)
+    // Also respect NO_COLOR environment variable per https://no-color.org/
+    if (opts.color === false || process.env.NO_COLOR) {
+      pc = picocolors.createColors(false);
+    }
   });
 
 // ------------------------------------------------------------

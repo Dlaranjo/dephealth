@@ -1,6 +1,7 @@
 import * as cdk from "aws-cdk-lib";
 import * as apigateway from "aws-cdk-lib/aws-apigateway";
 import * as cloudwatch from "aws-cdk-lib/aws-cloudwatch";
+import * as codedeploy from "aws-cdk-lib/aws-codedeploy";
 import * as dynamodb from "aws-cdk-lib/aws-dynamodb";
 import * as events from "aws-cdk-lib/aws-events";
 import * as iam from "aws-cdk-lib/aws-iam";
@@ -150,11 +151,11 @@ export class ApiStack extends cdk.Stack {
     packagesTable.grantReadData(getPackageHandler);
     apiKeysTable.grantReadWriteData(getPackageHandler);
 
-    // Note: Provisioned concurrency removed due to AWS account concurrent execution limits.
-    // To re-enable when traffic justifies it:
-    // 1. Request quota increase: https://console.aws.amazon.com/servicequotas/
-    // 2. Uncomment the alias below with provisionedConcurrentExecutions
-    // 3. Update the API Gateway integration to use getPackageAlias instead of getPackageHandler
+    // Create alias for safe deployments with automatic rollback
+    const getPackageAlias = new lambda.Alias(this, "GetPackageAlias", {
+      aliasName: "live",
+      version: getPackageHandler.currentVersion,
+    });
 
     // Scan packages handler
     const scanHandler = new lambda.Function(this, "ScanHandler", {
@@ -177,6 +178,12 @@ export class ApiStack extends cdk.Stack {
     if (packageQueue) {
       packageQueue.grantSendMessages(scanHandler);
     }
+
+    // Create alias for safe deployments with automatic rollback
+    const scanAlias = new lambda.Alias(this, "ScanAlias", {
+      aliasName: "live",
+      version: scanHandler.currentVersion,
+    });
 
     // Get usage handler
     const getUsageHandler = new lambda.Function(this, "GetUsageHandler", {
@@ -213,6 +220,12 @@ export class ApiStack extends cdk.Stack {
     billingEventsTable.grantReadWriteData(stripeWebhookHandler);
     stripeSecret.grantRead(stripeWebhookHandler);
     stripeWebhookSecret.grantRead(stripeWebhookHandler);
+
+    // Create alias for safe deployments with automatic rollback
+    const stripeWebhookAlias = new lambda.Alias(this, "StripeWebhookAlias", {
+      aliasName: "live",
+      version: stripeWebhookHandler.currentVersion,
+    });
 
     // Monthly usage reset handler (scheduled) - resets FREE tier users
     // Paid users with billing cycle data are skipped (reset via invoice.paid webhook)
@@ -927,7 +940,7 @@ export class ApiStack extends cdk.Stack {
     const packageNameResource = ecosystemResource.addResource("{name}");
     packageNameResource.addMethod(
       "GET",
-      new apigateway.LambdaIntegration(getPackageHandler, {
+      new apigateway.LambdaIntegration(getPackageAlias, {
         // Include path parameters and Origin header in cache key
         // Origin is required so CORS headers are cached correctly per origin
         cacheKeyParameters: [
@@ -963,7 +976,7 @@ export class ApiStack extends cdk.Stack {
     const scanResource = this.api.root.addResource("scan");
     scanResource.addMethod(
       "POST",
-      new apigateway.LambdaIntegration(scanHandler),
+      new apigateway.LambdaIntegration(scanAlias),
       {
         requestValidator: bodyValidator,
         requestModels: {
@@ -984,7 +997,7 @@ export class ApiStack extends cdk.Stack {
     const stripeWebhookResource = webhooksResource.addResource("stripe");
     stripeWebhookResource.addMethod(
       "POST",
-      new apigateway.LambdaIntegration(stripeWebhookHandler)
+      new apigateway.LambdaIntegration(stripeWebhookAlias)
     );
 
     // POST /checkout/create (session auth)
@@ -1263,10 +1276,11 @@ export class ApiStack extends cdk.Stack {
     // ===========================================
 
     // Helper to create standard Lambda alarms
+    // Returns { allAlarms, errorAlarm } so error alarm can be used for CodeDeploy rollback
     const createLambdaAlarms = (
       fn: lambda.Function,
       name: string
-    ): cloudwatch.Alarm[] => {
+    ): { allAlarms: cloudwatch.Alarm[]; errorAlarm: cloudwatch.Alarm } => {
       const alarms: cloudwatch.Alarm[] = [];
 
       // Error rate alarm (> 5% errors over 5 minutes)
@@ -1326,15 +1340,16 @@ export class ApiStack extends cdk.Stack {
         });
       }
 
-      return alarms;
+      return { allAlarms: alarms, errorAlarm };
     };
 
     // Create alarms for all API endpoints
+    // Store error alarms from critical handlers for CodeDeploy rollback
     createLambdaAlarms(healthHandler, "Health");
-    createLambdaAlarms(getPackageHandler, "GetPackage");
-    createLambdaAlarms(scanHandler, "Scan");
+    const getPackageAlarms = createLambdaAlarms(getPackageHandler, "GetPackage");
+    const scanAlarms = createLambdaAlarms(scanHandler, "Scan");
     createLambdaAlarms(getUsageHandler, "GetUsage");
-    createLambdaAlarms(stripeWebhookHandler, "StripeWebhook");
+    const stripeWebhookAlarms = createLambdaAlarms(stripeWebhookHandler, "StripeWebhook");
     createLambdaAlarms(createCheckoutHandler, "CreateCheckout");
     createLambdaAlarms(createBillingPortalHandler, "CreateBillingPortal");
     createLambdaAlarms(upgradePreviewHandler, "UpgradePreview");
@@ -1472,6 +1487,42 @@ export class ApiStack extends cdk.Stack {
       sesComplaintAlarm.addAlarmAction(new cw_actions.SnsAction(alertTopic));
       sesComplaintAlarm.addOkAction(new cw_actions.SnsAction(alertTopic));
     }
+
+    // ===========================================
+    // CodeDeploy: Safe Lambda Deployments with Auto-Rollback
+    // ===========================================
+    // Canary deployment: 10% traffic for 5 minutes, then 100%
+    // Auto-rollback on CloudWatch alarm (errors) or failed deployment
+
+    new codedeploy.LambdaDeploymentGroup(this, "GetPackageDeploymentGroup", {
+      alias: getPackageAlias,
+      deploymentConfig: codedeploy.LambdaDeploymentConfig.CANARY_10PERCENT_5MINUTES,
+      alarms: [getPackageAlarms.errorAlarm],
+      autoRollback: {
+        failedDeployment: true,
+        deploymentInAlarm: true,
+      },
+    });
+
+    new codedeploy.LambdaDeploymentGroup(this, "ScanDeploymentGroup", {
+      alias: scanAlias,
+      deploymentConfig: codedeploy.LambdaDeploymentConfig.CANARY_10PERCENT_5MINUTES,
+      alarms: [scanAlarms.errorAlarm],
+      autoRollback: {
+        failedDeployment: true,
+        deploymentInAlarm: true,
+      },
+    });
+
+    new codedeploy.LambdaDeploymentGroup(this, "StripeWebhookDeploymentGroup", {
+      alias: stripeWebhookAlias,
+      deploymentConfig: codedeploy.LambdaDeploymentConfig.CANARY_10PERCENT_5MINUTES,
+      alarms: [stripeWebhookAlarms.errorAlarm],
+      autoRollback: {
+        failedDeployment: true,
+        deploymentInAlarm: true,
+      },
+    });
 
     // Comprehensive API Dashboard
     new cloudwatch.Dashboard(this, "ApiDashboard", {

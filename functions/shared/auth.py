@@ -23,6 +23,8 @@ import boto3
 from boto3.dynamodb.conditions import Key
 from botocore.exceptions import ClientError
 
+from .circuit_breaker import DYNAMODB_CIRCUIT
+
 # DynamoDB throttling error codes that should trigger retry
 THROTTLING_ERRORS = (
     "ProvisionedThroughputExceededException",
@@ -97,6 +99,7 @@ def validate_api_key(api_key: str, max_retries: int = 3) -> Optional[dict]:
 
     Uses key-hash-index GSI for O(1) lookup.
     Includes retry with exponential backoff for DynamoDB throttling.
+    Protected by circuit breaker to prevent cascade failures.
 
     Args:
         api_key: The API key to validate (e.g., "pw_abc123...")
@@ -112,6 +115,11 @@ def validate_api_key(api_key: str, max_retries: int = 3) -> Optional[dict]:
     if not api_key.startswith("pw_"):
         return None
 
+    # Check circuit breaker before entering retry loop
+    if not DYNAMODB_CIRCUIT.can_execute():
+        logger.warning("DynamoDB circuit open, auth unavailable")
+        return None
+
     # Hash the key for lookup
     key_hash = hashlib.sha256(api_key.encode()).hexdigest()
 
@@ -124,6 +132,9 @@ def validate_api_key(api_key: str, max_retries: int = 3) -> Optional[dict]:
                 IndexName="key-hash-index",
                 KeyConditionExpression=Key("key_hash").eq(key_hash),
             )
+
+            # Record success even if no items found - DynamoDB call succeeded
+            DYNAMODB_CIRCUIT.record_success()
 
             items = response.get("Items", [])
             if not items:
@@ -144,22 +155,26 @@ def validate_api_key(api_key: str, max_retries: int = 3) -> Optional[dict]:
 
         except ClientError as e:
             error_code = e.response.get("Error", {}).get("Code", "")
-            if error_code in THROTTLING_ERRORS and attempt < max_retries - 1:
-                # Exponential backoff with jitter to prevent thundering herd
-                base_delay = min(0.1 * (2 ** attempt), 2.0)
-                jitter = random.uniform(0, base_delay * 0.5)
-                delay = base_delay + jitter
-                logger.warning(
-                    f"DynamoDB throttled during auth, retry {attempt + 1}/{max_retries} in {delay:.2f}s"
-                )
-                time.sleep(delay)
-                continue
+            if error_code in THROTTLING_ERRORS:
+                DYNAMODB_CIRCUIT.record_failure(e)
+                if attempt < max_retries - 1:
+                    # Exponential backoff with jitter to prevent thundering herd
+                    base_delay = min(0.1 * (2 ** attempt), 2.0)
+                    jitter = random.uniform(0, base_delay * 0.5)
+                    delay = base_delay + jitter
+                    logger.warning(
+                        f"DynamoDB throttled during auth, retry {attempt + 1}/{max_retries} in {delay:.2f}s"
+                    )
+                    time.sleep(delay)
+                    continue
             # Non-throttling error or max retries exceeded
             logger.error(f"Error validating API key: {e}")
             return None
 
         except Exception as e:
             # Log error but don't expose details
+            # Record failure for network errors, timeouts, etc.
+            DYNAMODB_CIRCUIT.record_failure(e)
             logger.error(f"Error validating API key: {e}")
             return None
 
@@ -202,6 +217,9 @@ def check_and_increment_usage(user_id: str, key_hash: str, limit: int) -> tuple[
     to prevent gaming via key deletion. Per-key counters are maintained for
     analytics purposes (best-effort, non-blocking).
 
+    Protected by circuit breaker with fail-open strategy: allows requests
+    when circuit is open (DynamoDB stress) to prevent total service outage.
+
     Args:
         user_id: User's partition key (pk)
         key_hash: Key hash (sort key / sk) - used for per-key analytics
@@ -211,7 +229,14 @@ def check_and_increment_usage(user_id: str, key_hash: str, limit: int) -> tuple[
         Tuple of (allowed: bool, new_count: int)
         - allowed: True if request was within limit and counter was incremented
         - new_count: The new usage count after increment (or current if denied)
+                     Returns -1 in degraded mode when circuit is open
     """
+    # Fail-open: allow requests when circuit is open (DynamoDB stress)
+    # This prevents total service outage during brief DynamoDB issues
+    if not DYNAMODB_CIRCUIT.can_execute():
+        logger.warning("DynamoDB circuit open, allowing request (degraded mode)")
+        return True, -1  # -1 signals degraded mode to caller
+
     table = _get_dynamodb().Table(API_KEYS_TABLE)
 
     try:
@@ -227,6 +252,7 @@ def check_and_increment_usage(user_id: str, key_hash: str, limit: int) -> tuple[
             },
             ReturnValues="UPDATED_NEW",
         )
+        DYNAMODB_CIRCUIT.record_success()
         new_count = response.get("Attributes", {}).get("requests_this_month", 1)
 
         # Also increment per-key counter for analytics (best-effort, non-blocking)
@@ -241,8 +267,11 @@ def check_and_increment_usage(user_id: str, key_hash: str, limit: int) -> tuple[
 
         return True, new_count
     except ClientError as e:
-        if e.response["Error"]["Code"] == "ConditionalCheckFailedException":
-            # Rate limit exceeded - get current count for accurate remaining calculation
+        error_code = e.response.get("Error", {}).get("Code", "")
+        if error_code == "ConditionalCheckFailedException":
+            # Rate limit exceeded - this is expected behavior, record success
+            DYNAMODB_CIRCUIT.record_success()
+            # Get current count for accurate remaining calculation
             try:
                 get_response = table.get_item(
                     Key={"pk": user_id, "sk": "USER_META"},
@@ -252,6 +281,8 @@ def check_and_increment_usage(user_id: str, key_hash: str, limit: int) -> tuple[
                 return False, current_count
             except Exception:
                 return False, limit
+        if error_code in THROTTLING_ERRORS:
+            DYNAMODB_CIRCUIT.record_failure(e)
         raise
 
 
@@ -265,6 +296,9 @@ def check_and_increment_usage_batch(
     to prevent gaming via key deletion. Per-key counters are maintained for
     analytics purposes (best-effort, non-blocking).
 
+    Protected by circuit breaker with fail-open strategy: allows requests
+    when circuit is open (DynamoDB stress) to prevent total service outage.
+
     Args:
         user_id: User's partition key (pk)
         key_hash: Key hash (sort key / sk) - used for per-key analytics
@@ -275,7 +309,14 @@ def check_and_increment_usage_batch(
         Tuple of (allowed: bool, new_count: int)
         - allowed: True if request was within limit and counter was incremented
         - new_count: The new usage count after increment (or current if denied)
+                     Returns -1 in degraded mode when circuit is open
     """
+    # Fail-open: allow requests when circuit is open (DynamoDB stress)
+    # This prevents total service outage during brief DynamoDB issues
+    if not DYNAMODB_CIRCUIT.can_execute():
+        logger.warning("DynamoDB circuit open, allowing batch request (degraded mode)")
+        return True, -1  # -1 signals degraded mode to caller
+
     table = _get_dynamodb().Table(API_KEYS_TABLE)
 
     # Calculate threshold: if current count is at or above this, we'd exceed limit
@@ -295,6 +336,7 @@ def check_and_increment_usage_batch(
             },
             ReturnValues="UPDATED_NEW",
         )
+        DYNAMODB_CIRCUIT.record_success()
         new_count = response.get("Attributes", {}).get("requests_this_month", count)
 
         # Also increment per-key counter for analytics (best-effort, non-blocking)
@@ -309,8 +351,11 @@ def check_and_increment_usage_batch(
 
         return True, new_count
     except ClientError as e:
-        if e.response["Error"]["Code"] == "ConditionalCheckFailedException":
-            # Rate limit would be exceeded - get current count for accurate remaining
+        error_code = e.response.get("Error", {}).get("Code", "")
+        if error_code == "ConditionalCheckFailedException":
+            # Rate limit would be exceeded - this is expected behavior, record success
+            DYNAMODB_CIRCUIT.record_success()
+            # Get current count for accurate remaining
             try:
                 get_response = table.get_item(
                     Key={"pk": user_id, "sk": "USER_META"},
@@ -322,6 +367,8 @@ def check_and_increment_usage_batch(
                 return False, current_count
             except Exception:
                 return False, limit
+        if error_code in THROTTLING_ERRORS:
+            DYNAMODB_CIRCUIT.record_failure(e)
         raise
 
 

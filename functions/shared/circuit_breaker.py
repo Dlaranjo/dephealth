@@ -297,9 +297,9 @@ PYPI_CIRCUIT = InMemoryCircuitBreaker(
 )
 
 # DynamoDB circuit breaker - for protecting against throttling cascades
-# NOTE: Available for future use - not yet wired to DynamoDB operations.
-# When integrated, wrap DynamoDB calls to prevent cascade failures during
-# throttling events or capacity issues.
+# Wired to auth.py functions (validate_api_key, check_and_increment_usage, etc.)
+# to prevent cascade failures during throttling events or capacity issues.
+# Uses fail-open strategy for usage tracking to avoid total service outage.
 DYNAMODB_CIRCUIT = InMemoryCircuitBreaker(
     "dynamodb",
     CircuitBreakerConfig(
