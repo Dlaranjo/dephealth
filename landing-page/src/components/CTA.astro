@@ -58,22 +58,33 @@
     const AUTH_CACHE_KEY = 'pkgwatch_auth_cache';
 
     function updateCTAAuth(isLoggedIn: boolean) {
+      const guestBtn = document.getElementById('cta-guest');
+      const userBtn = document.getElementById('cta-user');
+
+      if (!guestBtn || !userBtn) return; // Elements not ready yet
+
       if (isLoggedIn) {
-        document.getElementById('cta-guest')?.classList.add('hidden');
-        document.getElementById('cta-user')?.classList.remove('hidden');
+        guestBtn.classList.add('hidden');
+        userBtn.classList.remove('hidden');
       } else {
-        document.getElementById('cta-guest')?.classList.remove('hidden');
-        document.getElementById('cta-user')?.classList.add('hidden');
+        guestBtn.classList.remove('hidden');
+        userBtn.classList.add('hidden');
       }
     }
 
-    // Check cache immediately for instant render (no flash)
-    const cached = sessionStorage.getItem(AUTH_CACHE_KEY);
-    if (cached) {
+    // Check cache and update UI when DOM is ready
+    function initCTAAuth() {
       try {
-        const auth = JSON.parse(cached);
-        if (auth.isLoggedIn) updateCTAAuth(true);
+        const cached = sessionStorage.getItem(AUTH_CACHE_KEY);
+        if (cached) {
+          const auth = JSON.parse(cached);
+          if (auth.isLoggedIn) {
+            updateCTAAuth(true);
+            return;
+          }
+        }
       } catch {}
+      // Default: show guest state (already the default in HTML)
     }
 
     // Listen for auth events (handles validation updates and cache misses)
@@ -81,6 +92,13 @@
       const detail = (e as CustomEvent).detail;
       updateCTAAuth(detail?.user != null);
     });
+
+    // Run when DOM is ready
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', initCTAAuth);
+    } else {
+      initCTAAuth();
+    }
   </script>
 
   <!-- Pricing Info -->
