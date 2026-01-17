@@ -445,7 +445,7 @@ pkgwatch check express
 pkgwatch scan
 
 # Scan all manifests in a monorepo
-pkgwatch scan --recursive</code></pre>
+pkgwatch scan --recursive --max-manifests 200</code></pre>
           </div>
           <p class="text-zinc-500 text-sm">
             Configure your API key with <code class="bg-black/30 px-2 py-1 rounded">pkgwatch config set</code>
@@ -476,7 +476,8 @@ jobs:
         with:
           api-key: $&#123;&#123; secrets.PKGWATCH_API_KEY &#125;&#125;
           fail-on: HIGH
-          scan-mode: recursive  # scans all manifests in repo</code></pre>
+          scan-mode: recursive
+          max-manifests: '200'  # default: 100</code></pre>
           </div>
         </div>
       </section>

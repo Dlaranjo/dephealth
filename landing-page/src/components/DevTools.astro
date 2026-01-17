@@ -42,7 +42,7 @@
         <div class="text-zinc-500 mb-2"># Scan your project (CI-friendly)</div>
         <div class="text-white mb-3">pkgwatch scan --fail-on HIGH</div>
         <div class="text-zinc-500 mb-2"># Scan entire monorepo</div>
-        <div class="text-white">pkgwatch scan --recursive</div>
+        <div class="text-white">pkgwatch scan --recursive --max-manifests 200</div>
       </div>
     </div>
 
@@ -70,7 +70,8 @@
   with:
     api-key: {'${{ secrets.PKGWATCH_API_KEY }}'}
     fail-on: HIGH
-    scan-mode: recursive  # for monorepos</code></pre>
+    scan-mode: recursive
+    max-manifests: '200'  # default: 100</code></pre>
       </div>
     </div>
   </div>
