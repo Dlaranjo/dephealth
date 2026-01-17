@@ -121,7 +121,8 @@ function getClient(): PkgWatchClient {
 /**
  * Format health score with color.
  */
-function formatScore(score: number): string {
+function formatScore(score: number | null): string {
+  if (score === null) return pc.dim("--/100");
   if (score >= 70) return pc.green(`${score}/100`);
   if (score >= 50) return pc.yellow(`${score}/100`);
   return pc.red(`${score}/100`);
@@ -563,11 +564,17 @@ async function runRecursiveScan(
         const critical = m.packages.filter((p) => p.risk_level === "CRITICAL");
         const high = m.packages.filter((p) => p.risk_level === "HIGH");
 
+        // Helper to format package name with data quality indicator
+        const formatPkg = (p: PackageHealth) => {
+          const isUnverified = !p.data_quality || p.data_quality.assessment !== "VERIFIED";
+          return isUnverified ? `${p.package}${pc.dim("*")}` : p.package;
+        };
+
         if (critical.length > 0) {
-          log(`  ${pc.red(`CRITICAL (${critical.length}):`)} ${critical.map((p) => p.package).join(", ")}`);
+          log(`  ${pc.red(`CRITICAL (${critical.length}):`)} ${critical.map(formatPkg).join(", ")}`);
         }
         if (high.length > 0) {
-          log(`  ${pc.red(`HIGH (${high.length}):`)} ${high.map((p) => p.package).join(", ")}`);
+          log(`  ${pc.red(`HIGH (${high.length}):`)} ${high.map(formatPkg).join(", ")}`);
         }
         if (critical.length === 0 && high.length === 0 && m.packages.length > 0) {
           log(`  ${pc.green("No high-risk issues")} (${m.packages.length} packages)`);
@@ -600,6 +607,25 @@ async function runRecursiveScan(
     log(
       `  ${pc.red(`${summary.critical} critical`)}, ${pc.red(`${summary.high} high`)}, ${pc.yellow(`${summary.medium} medium`)}, ${pc.green(`${summary.low} low`)}`
     );
+
+    // Calculate aggregate data quality from all manifests (deduplicated)
+    const unverifiedRiskPackages = new Set<string>();
+    for (const m of result.manifests) {
+      if (m.status === "success" && m.packages) {
+        for (const pkg of m.packages) {
+          if ((pkg.risk_level === "CRITICAL" || pkg.risk_level === "HIGH") &&
+              (!pkg.data_quality || pkg.data_quality.assessment !== "VERIFIED")) {
+            unverifiedRiskPackages.add(pkg.package);
+          }
+        }
+      }
+    }
+
+    if (unverifiedRiskPackages.size > 0) {
+      log("");
+      log(pc.yellow(`Note: ${unverifiedRiskPackages.size} unique HIGH/CRITICAL packages have incomplete data.`));
+      log(pc.dim(`Packages marked with * may appear risky due to missing repository information.`));
+    }
 
     if (result.truncated) {
       log(pc.yellow(`\n⚠ Truncated: Max manifest limit reached`));
@@ -841,7 +867,29 @@ program
           console.log("");
         }
 
-        // Aggregate results
+        // Aggregate results with data quality
+        let verifiedCount = 0;
+        let partialCount = 0;
+        let unverifiedCount = 0;
+        let verifiedRiskCount = 0;
+        let unverifiedRiskCount = 0;
+
+        for (const pkg of allPackages) {
+          const assessment = pkg.data_quality?.assessment || "UNVERIFIED";
+          const isHighRisk = pkg.risk_level === "HIGH" || pkg.risk_level === "CRITICAL";
+
+          if (assessment === "VERIFIED") {
+            verifiedCount++;
+            if (isHighRisk) verifiedRiskCount++;
+          } else if (assessment === "PARTIAL") {
+            partialCount++;
+            if (isHighRisk) unverifiedRiskCount++;
+          } else {
+            unverifiedCount++;
+            if (isHighRisk) unverifiedRiskCount++;
+          }
+        }
+
         result = {
           total: allPackages.length,
           critical: allPackages.filter((p: PackageHealth) => p.risk_level === "CRITICAL").length,
@@ -850,6 +898,13 @@ program
           low: allPackages.filter((p: PackageHealth) => p.risk_level === "LOW").length,
           packages: allPackages,
           not_found: notFound.length > 0 ? notFound : undefined,
+          data_quality: {
+            verified_count: verifiedCount,
+            partial_count: partialCount,
+            unverified_count: unverifiedCount,
+          },
+          verified_risk_count: verifiedRiskCount,
+          unverified_risk_count: unverifiedRiskCount,
         };
       } else {
         // Use spinner for smaller scans
@@ -878,7 +933,9 @@ program
           log(pc.red(pc.bold(`CRITICAL (${critical.length})`)));
           for (const pkg of critical) {
             const reason = pkg.abandonment_risk?.risk_factors?.[0] || "";
-            log(`  ${pc.red(pkg.package.padEnd(20))} ${formatScore(pkg.health_score)}   ${reason}`);
+            const isUnverified = !pkg.data_quality || pkg.data_quality.assessment !== "VERIFIED";
+            const qualifier = isUnverified ? pc.dim(" (limited data)") : "";
+            log(`  ${pc.red(pkg.package.padEnd(20))} ${formatScore(pkg.health_score)}   ${reason}${qualifier}`);
           }
           log("");
         }
@@ -887,7 +944,9 @@ program
           log(pc.red(`HIGH (${high.length})`));
           for (const pkg of high) {
             const reason = pkg.abandonment_risk?.risk_factors?.[0] || "";
-            log(`  ${pkg.package.padEnd(20)} ${formatScore(pkg.health_score)}   ${reason}`);
+            const isUnverified = !pkg.data_quality || pkg.data_quality.assessment !== "VERIFIED";
+            const qualifier = isUnverified ? pc.dim(" (limited data)") : "";
+            log(`  ${pkg.package.padEnd(20)} ${formatScore(pkg.health_score)}   ${reason}${qualifier}`);
           }
           log("");
         }
@@ -905,6 +964,24 @@ program
         log(
           `Summary: ${pc.red(`${result.critical} critical`)}, ${pc.red(`${result.high} high`)}, ${pc.yellow(`${result.medium} medium`)}, ${pc.green(`${result.low} low`)}`
         );
+
+        // Data quality summary (if available)
+        if (result.data_quality) {
+          const dq = result.data_quality;
+          log("");
+          log(pc.cyan("Data Quality:"));
+          log(`  Verified:   ${dq.verified_count} packages (complete data)`);
+          log(`  Partial:    ${dq.partial_count} packages (some data missing)`);
+          log(`  Unverified: ${dq.unverified_count} packages (limited data)`);
+        }
+
+        // Warn about unverified risks
+        const unverifiedRisk = result.unverified_risk_count || 0;
+        if (unverifiedRisk > 0) {
+          log("");
+          log(pc.yellow(`Note: ${unverifiedRisk} HIGH/CRITICAL packages have incomplete data.`));
+          log(pc.dim(`These may appear risky due to missing repository information.`));
+        }
         break;
       }
 

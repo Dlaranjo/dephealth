@@ -285,3 +285,150 @@ class TestGetPackageHandler:
         assert "Retry-After" in result["headers"]
         assert result["headers"]["X-RateLimit-Remaining"] == "0"
         assert "signup_url" in body["error"]
+
+
+class TestDataQualityInGetPackage:
+    """Tests for data_quality field in GET /packages response."""
+
+    @mock_aws
+    def test_response_includes_data_quality_field(
+        self, seeded_api_keys_table, seeded_packages_table, api_gateway_event
+    ):
+        """Should include data_quality in successful response."""
+        os.environ["PACKAGES_TABLE"] = "pkgwatch-packages"
+        os.environ["API_KEYS_TABLE"] = "pkgwatch-api-keys"
+
+        from api.get_package import handler
+
+        table, test_key = seeded_api_keys_table
+        api_gateway_event["pathParameters"] = {"ecosystem": "npm", "name": "lodash"}
+        api_gateway_event["headers"]["x-api-key"] = test_key
+
+        result = handler(api_gateway_event, {})
+
+        assert result["statusCode"] == 200
+        body = json.loads(result["body"])
+        assert "data_quality" in body
+        assert "assessment" in body["data_quality"]
+        assert "status" in body["data_quality"]
+        assert "has_repository" in body["data_quality"]
+        assert "explanation" in body["data_quality"]
+        assert "missing_sources" in body["data_quality"]
+
+    @mock_aws
+    def test_data_quality_verified_for_complete_package(
+        self, seeded_api_keys_table, mock_dynamodb, api_gateway_event
+    ):
+        """Should return VERIFIED assessment for complete data package."""
+        os.environ["PACKAGES_TABLE"] = "pkgwatch-packages"
+        os.environ["API_KEYS_TABLE"] = "pkgwatch-api-keys"
+
+        # Seed a package with complete data
+        packages_table = mock_dynamodb.Table("pkgwatch-packages")
+        packages_table.put_item(
+            Item={
+                "pk": "npm#verified-pkg",
+                "sk": "LATEST",
+                "ecosystem": "npm",
+                "name": "verified-pkg",
+                "health_score": 90,
+                "risk_level": "LOW",
+                "data_status": "complete",
+                "missing_sources": [],
+                "repository_url": "https://github.com/owner/repo",
+                "last_updated": "2024-01-01T00:00:00Z",
+            }
+        )
+
+        from api.get_package import handler
+
+        table, test_key = seeded_api_keys_table
+        api_gateway_event["pathParameters"] = {"ecosystem": "npm", "name": "verified-pkg"}
+        api_gateway_event["headers"]["x-api-key"] = test_key
+
+        result = handler(api_gateway_event, {})
+
+        assert result["statusCode"] == 200
+        body = json.loads(result["body"])
+        assert body["data_quality"]["status"] == "complete"
+        assert body["data_quality"]["assessment"] == "VERIFIED"
+        assert body["data_quality"]["has_repository"] is True
+        assert body["data_quality"]["missing_sources"] == []
+
+    @mock_aws
+    def test_data_quality_unverified_for_minimal_package(
+        self, seeded_api_keys_table, mock_dynamodb, api_gateway_event
+    ):
+        """Should return UNVERIFIED assessment for minimal data package."""
+        os.environ["PACKAGES_TABLE"] = "pkgwatch-packages"
+        os.environ["API_KEYS_TABLE"] = "pkgwatch-api-keys"
+
+        # Seed a package with minimal data
+        packages_table = mock_dynamodb.Table("pkgwatch-packages")
+        packages_table.put_item(
+            Item={
+                "pk": "npm#minimal-pkg",
+                "sk": "LATEST",
+                "ecosystem": "npm",
+                "name": "minimal-pkg",
+                "health_score": 40,
+                "risk_level": "CRITICAL",
+                "data_status": "minimal",
+                "missing_sources": ["github", "depsdev"],
+                "repository_url": None,
+                "last_updated": "2024-01-01T00:00:00Z",
+            }
+        )
+
+        from api.get_package import handler
+
+        table, test_key = seeded_api_keys_table
+        api_gateway_event["pathParameters"] = {"ecosystem": "npm", "name": "minimal-pkg"}
+        api_gateway_event["headers"]["x-api-key"] = test_key
+
+        result = handler(api_gateway_event, {})
+
+        assert result["statusCode"] == 200
+        body = json.loads(result["body"])
+        assert body["data_quality"]["status"] == "minimal"
+        assert body["data_quality"]["assessment"] == "UNVERIFIED"
+        assert body["data_quality"]["has_repository"] is False
+        assert "No repository URL" in body["data_quality"]["explanation"]
+
+    @mock_aws
+    def test_data_quality_defaults_for_legacy_package(
+        self, seeded_api_keys_table, mock_dynamodb, api_gateway_event
+    ):
+        """Should return UNVERIFIED for packages without data_status field."""
+        os.environ["PACKAGES_TABLE"] = "pkgwatch-packages"
+        os.environ["API_KEYS_TABLE"] = "pkgwatch-api-keys"
+
+        # Seed a legacy package without data_status field
+        packages_table = mock_dynamodb.Table("pkgwatch-packages")
+        packages_table.put_item(
+            Item={
+                "pk": "npm#legacy-pkg",
+                "sk": "LATEST",
+                "ecosystem": "npm",
+                "name": "legacy-pkg",
+                "health_score": 60,
+                "risk_level": "MEDIUM",
+                # No data_status, no missing_sources, no repository_url
+                "last_updated": "2024-01-01T00:00:00Z",
+            }
+        )
+
+        from api.get_package import handler
+
+        table, test_key = seeded_api_keys_table
+        api_gateway_event["pathParameters"] = {"ecosystem": "npm", "name": "legacy-pkg"}
+        api_gateway_event["headers"]["x-api-key"] = test_key
+
+        result = handler(api_gateway_event, {})
+
+        assert result["statusCode"] == 200
+        body = json.loads(result["body"])
+        # Should default to minimal/UNVERIFIED
+        assert body["data_quality"]["status"] == "minimal"
+        assert body["data_quality"]["assessment"] == "UNVERIFIED"
+        assert body["data_quality"]["has_repository"] is False

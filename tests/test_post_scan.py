@@ -423,3 +423,306 @@ class TestPostScanEcosystem:
         assert result["statusCode"] == 400
         body = json.loads(result["body"])
         assert body["error"]["code"] == "invalid_ecosystem"
+
+
+class TestDataQualityInScan:
+    """Tests for data_quality field in POST /scan response."""
+
+    @mock_aws
+    def test_scan_includes_data_quality_per_package(
+        self, seeded_api_keys_table, seeded_packages_table, api_gateway_event
+    ):
+        """Should include data_quality for each scanned package."""
+        os.environ["PACKAGES_TABLE"] = "pkgwatch-packages"
+        os.environ["API_KEYS_TABLE"] = "pkgwatch-api-keys"
+
+        from api.post_scan import handler
+
+        table, test_key = seeded_api_keys_table
+
+        api_gateway_event["httpMethod"] = "POST"
+        api_gateway_event["headers"]["x-api-key"] = test_key
+        api_gateway_event["body"] = json.dumps({
+            "dependencies": {"lodash": "^4.17.21"},
+        })
+
+        result = handler(api_gateway_event, {})
+
+        assert result["statusCode"] == 200
+        body = json.loads(result["body"])
+        assert len(body["packages"]) == 1
+        pkg = body["packages"][0]
+        assert "data_quality" in pkg
+        assert "assessment" in pkg["data_quality"]
+        assert "has_repository" in pkg["data_quality"]
+
+    @mock_aws
+    def test_scan_summary_includes_quality_breakdown(
+        self, seeded_api_keys_table, mock_dynamodb, api_gateway_event
+    ):
+        """Should include verified/partial/unverified counts in response."""
+        os.environ["PACKAGES_TABLE"] = "pkgwatch-packages"
+        os.environ["API_KEYS_TABLE"] = "pkgwatch-api-keys"
+
+        # Add packages with different data statuses
+        packages_table = mock_dynamodb.Table("pkgwatch-packages")
+
+        # Package with complete data
+        packages_table.put_item(
+            Item={
+                "pk": "npm#verified-pkg",
+                "sk": "LATEST",
+                "ecosystem": "npm",
+                "name": "verified-pkg",
+                "health_score": 90,
+                "risk_level": "LOW",
+                "data_status": "complete",
+                "missing_sources": [],
+                "repository_url": "https://github.com/owner/repo",
+                "last_updated": "2024-01-01T00:00:00Z",
+            }
+        )
+
+        # Package with partial data
+        packages_table.put_item(
+            Item={
+                "pk": "npm#partial-pkg",
+                "sk": "LATEST",
+                "ecosystem": "npm",
+                "name": "partial-pkg",
+                "health_score": 60,
+                "risk_level": "MEDIUM",
+                "data_status": "partial",
+                "missing_sources": ["github"],
+                "repository_url": "https://github.com/owner/repo2",
+                "last_updated": "2024-01-01T00:00:00Z",
+            }
+        )
+
+        # Package with minimal data
+        packages_table.put_item(
+            Item={
+                "pk": "npm#minimal-pkg",
+                "sk": "LATEST",
+                "ecosystem": "npm",
+                "name": "minimal-pkg",
+                "health_score": 30,
+                "risk_level": "HIGH",
+                "data_status": "minimal",
+                "missing_sources": ["github", "depsdev"],
+                "last_updated": "2024-01-01T00:00:00Z",
+            }
+        )
+
+        from api.post_scan import handler
+
+        table, test_key = seeded_api_keys_table
+
+        api_gateway_event["httpMethod"] = "POST"
+        api_gateway_event["headers"]["x-api-key"] = test_key
+        api_gateway_event["body"] = json.dumps({
+            "dependencies": {
+                "verified-pkg": "^1.0.0",
+                "partial-pkg": "^1.0.0",
+                "minimal-pkg": "^1.0.0",
+            },
+        })
+
+        result = handler(api_gateway_event, {})
+
+        assert result["statusCode"] == 200
+        body = json.loads(result["body"])
+        assert "data_quality" in body
+        assert body["data_quality"]["verified_count"] == 1
+        assert body["data_quality"]["partial_count"] == 1
+        assert body["data_quality"]["unverified_count"] == 1
+
+    @mock_aws
+    def test_scan_counts_verified_vs_unverified_risk(
+        self, seeded_api_keys_table, mock_dynamodb, api_gateway_event
+    ):
+        """Should separately count verified and unverified HIGH/CRITICAL packages."""
+        os.environ["PACKAGES_TABLE"] = "pkgwatch-packages"
+        os.environ["API_KEYS_TABLE"] = "pkgwatch-api-keys"
+
+        packages_table = mock_dynamodb.Table("pkgwatch-packages")
+
+        # HIGH risk package with verified data
+        packages_table.put_item(
+            Item={
+                "pk": "npm#verified-high",
+                "sk": "LATEST",
+                "ecosystem": "npm",
+                "name": "verified-high",
+                "health_score": 30,
+                "risk_level": "HIGH",
+                "data_status": "complete",
+                "missing_sources": [],
+                "repository_url": "https://github.com/owner/repo",
+                "last_updated": "2024-01-01T00:00:00Z",
+            }
+        )
+
+        # CRITICAL risk package with unverified data
+        packages_table.put_item(
+            Item={
+                "pk": "npm#unverified-critical",
+                "sk": "LATEST",
+                "ecosystem": "npm",
+                "name": "unverified-critical",
+                "health_score": 20,
+                "risk_level": "CRITICAL",
+                "data_status": "minimal",
+                "missing_sources": ["github"],
+                "last_updated": "2024-01-01T00:00:00Z",
+            }
+        )
+
+        # LOW risk package with unverified data (should not count in risk counts)
+        packages_table.put_item(
+            Item={
+                "pk": "npm#unverified-low",
+                "sk": "LATEST",
+                "ecosystem": "npm",
+                "name": "unverified-low",
+                "health_score": 70,
+                "risk_level": "LOW",
+                "data_status": "minimal",
+                "missing_sources": ["github"],
+                "last_updated": "2024-01-01T00:00:00Z",
+            }
+        )
+
+        from api.post_scan import handler
+
+        table, test_key = seeded_api_keys_table
+
+        api_gateway_event["httpMethod"] = "POST"
+        api_gateway_event["headers"]["x-api-key"] = test_key
+        api_gateway_event["body"] = json.dumps({
+            "dependencies": {
+                "verified-high": "^1.0.0",
+                "unverified-critical": "^1.0.0",
+                "unverified-low": "^1.0.0",
+            },
+        })
+
+        result = handler(api_gateway_event, {})
+
+        assert result["statusCode"] == 200
+        body = json.loads(result["body"])
+        assert body["verified_risk_count"] == 1  # verified-high
+        assert body["unverified_risk_count"] == 1  # unverified-critical (not unverified-low)
+
+    @mock_aws
+    def test_scan_data_quality_verified_for_complete_package(
+        self, seeded_api_keys_table, mock_dynamodb, api_gateway_event
+    ):
+        """Should return VERIFIED assessment for packages with complete data."""
+        os.environ["PACKAGES_TABLE"] = "pkgwatch-packages"
+        os.environ["API_KEYS_TABLE"] = "pkgwatch-api-keys"
+
+        packages_table = mock_dynamodb.Table("pkgwatch-packages")
+        packages_table.put_item(
+            Item={
+                "pk": "npm#complete-pkg",
+                "sk": "LATEST",
+                "ecosystem": "npm",
+                "name": "complete-pkg",
+                "health_score": 85,
+                "risk_level": "LOW",
+                "data_status": "complete",
+                "missing_sources": [],
+                "repository_url": "https://github.com/owner/repo",
+                "last_updated": "2024-01-01T00:00:00Z",
+            }
+        )
+
+        from api.post_scan import handler
+
+        table, test_key = seeded_api_keys_table
+
+        api_gateway_event["httpMethod"] = "POST"
+        api_gateway_event["headers"]["x-api-key"] = test_key
+        api_gateway_event["body"] = json.dumps({
+            "dependencies": {"complete-pkg": "^1.0.0"},
+        })
+
+        result = handler(api_gateway_event, {})
+
+        assert result["statusCode"] == 200
+        body = json.loads(result["body"])
+        pkg = body["packages"][0]
+        assert pkg["data_quality"]["assessment"] == "VERIFIED"
+        assert pkg["data_quality"]["has_repository"] is True
+
+    @mock_aws
+    def test_scan_data_quality_unverified_for_legacy_package(
+        self, seeded_api_keys_table, seeded_packages_table, api_gateway_event
+    ):
+        """Should return UNVERIFIED for packages without data_status field."""
+        os.environ["PACKAGES_TABLE"] = "pkgwatch-packages"
+        os.environ["API_KEYS_TABLE"] = "pkgwatch-api-keys"
+
+        # seeded_packages_table adds lodash without data_status field
+
+        from api.post_scan import handler
+
+        table, test_key = seeded_api_keys_table
+
+        api_gateway_event["httpMethod"] = "POST"
+        api_gateway_event["headers"]["x-api-key"] = test_key
+        api_gateway_event["body"] = json.dumps({
+            "dependencies": {"lodash": "^4.17.21"},
+        })
+
+        result = handler(api_gateway_event, {})
+
+        assert result["statusCode"] == 200
+        body = json.loads(result["body"])
+        pkg = body["packages"][0]
+        # Legacy packages without data_status default to UNVERIFIED
+        assert pkg["data_quality"]["assessment"] == "UNVERIFIED"
+        assert pkg["data_quality"]["has_repository"] is False
+
+    @mock_aws
+    def test_scan_data_quality_partial_with_repo(
+        self, seeded_api_keys_table, mock_dynamodb, api_gateway_event
+    ):
+        """Should return PARTIAL for packages with partial data and repository."""
+        os.environ["PACKAGES_TABLE"] = "pkgwatch-packages"
+        os.environ["API_KEYS_TABLE"] = "pkgwatch-api-keys"
+
+        packages_table = mock_dynamodb.Table("pkgwatch-packages")
+        packages_table.put_item(
+            Item={
+                "pk": "npm#partial-repo-pkg",
+                "sk": "LATEST",
+                "ecosystem": "npm",
+                "name": "partial-repo-pkg",
+                "health_score": 65,
+                "risk_level": "MEDIUM",
+                "data_status": "partial",
+                "missing_sources": ["github"],
+                "repository_url": "https://github.com/owner/repo",
+                "last_updated": "2024-01-01T00:00:00Z",
+            }
+        )
+
+        from api.post_scan import handler
+
+        table, test_key = seeded_api_keys_table
+
+        api_gateway_event["httpMethod"] = "POST"
+        api_gateway_event["headers"]["x-api-key"] = test_key
+        api_gateway_event["body"] = json.dumps({
+            "dependencies": {"partial-repo-pkg": "^1.0.0"},
+        })
+
+        result = handler(api_gateway_event, {})
+
+        assert result["statusCode"] == 200
+        body = json.loads(result["body"])
+        pkg = body["packages"][0]
+        assert pkg["data_quality"]["assessment"] == "PARTIAL"
+        assert pkg["data_quality"]["has_repository"] is True

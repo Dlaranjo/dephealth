@@ -13,6 +13,11 @@ export {
   type AbandonmentRisk,
   type RiskLevel,
   type ErrorCode,
+  // Data quality types
+  type AssessmentCategory,
+  type DataQuality,
+  type DataQualityCompact,
+  type DataQualitySummary,
   // Dependency parsing
   type Ecosystem,
   type ParseResult,

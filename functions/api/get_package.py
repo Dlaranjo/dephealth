@@ -19,6 +19,7 @@ logger.setLevel(logging.INFO)
 from shared.auth import validate_api_key, check_and_increment_usage
 from shared.response_utils import decimal_default, error_response
 from shared.rate_limit_utils import check_usage_alerts, get_reset_timestamp
+from shared.data_quality import build_data_quality_full
 
 # Demo mode settings
 DEMO_REQUESTS_PER_HOUR = 20
@@ -297,6 +298,8 @@ def handler(event, context):
         "last_published": item.get("last_published"),
         "repository_url": item.get("repository_url"),
         "last_updated": item.get("last_updated"),
+        # Data completeness transparency
+        "data_quality": build_data_quality_full(item),
     }
 
     # Build response headers

@@ -64,15 +64,29 @@ export async function generateSummary(
         { data: "Package", header: true },
         { data: "Risk", header: true },
         { data: "Score", header: true },
+        { data: "Data", header: true },
         { data: "Key Issue", header: true },
       ],
-      ...riskPackages.map((pkg) => [
-        `\`${escapeMarkdown(pkg.package)}\``,
-        pkg.risk_level,
-        `${pkg.health_score}/100`,
-        escapeMarkdown(pkg.abandonment_risk?.risk_factors?.[0] || "-"),
-      ]),
+      ...riskPackages.map((pkg) => {
+        const isUnverified = !pkg.data_quality || pkg.data_quality.assessment !== "VERIFIED";
+        const dataStatus = isUnverified ? "⚠️" : "✓";
+        return [
+          `\`${escapeMarkdown(pkg.package)}\``,
+          pkg.risk_level,
+          `${pkg.health_score}/100`,
+          dataStatus,
+          escapeMarkdown(pkg.abandonment_risk?.risk_factors?.[0] || "-"),
+        ];
+      }),
     ]);
+  }
+
+  // Data quality note
+  const unverifiedRisk = result.unverified_risk_count || 0;
+  if (unverifiedRisk > 0) {
+    summary.addRaw("\n> [!NOTE]\n");
+    summary.addRaw(`> **${unverifiedRisk} package(s) have incomplete data** (marked ⚠️). `);
+    summary.addRaw("Risk levels may be inaccurate due to missing repository information.\n\n");
   }
 
   // All packages in collapsible
@@ -225,17 +239,34 @@ export async function generateRepoSummary(
         { data: "Package", header: true },
         { data: "Risk", header: true },
         { data: "Score", header: true },
+        { data: "Data", header: true },
         { data: "Location", header: true },
         { data: "Key Issue", header: true },
       ],
-      ...uniqueRiskPackages.map(({ pkg, manifest }) => [
-        `\`${escapeMarkdown(pkg.package)}\``,
-        pkg.risk_level,
-        `${pkg.health_score}/100`,
-        `\`${escapeMarkdown(manifest)}\``,
-        escapeMarkdown(pkg.abandonment_risk?.risk_factors?.[0] || "-"),
-      ]),
+      ...uniqueRiskPackages.map(({ pkg, manifest }) => {
+        const isUnverified = !pkg.data_quality || pkg.data_quality.assessment !== "VERIFIED";
+        const dataStatus = isUnverified ? "⚠️" : "✓";
+        return [
+          `\`${escapeMarkdown(pkg.package)}\``,
+          pkg.risk_level,
+          `${pkg.health_score}/100`,
+          dataStatus,
+          `\`${escapeMarkdown(manifest)}\``,
+          escapeMarkdown(pkg.abandonment_risk?.risk_factors?.[0] || "-"),
+        ];
+      }),
     ]);
+
+    // Count unverified high-risk packages
+    const unverifiedRiskCount = uniqueRiskPackages.filter(
+      ({ pkg }) => !pkg.data_quality || pkg.data_quality.assessment !== "VERIFIED"
+    ).length;
+
+    if (unverifiedRiskCount > 0) {
+      summary.addRaw("\n> [!NOTE]\n");
+      summary.addRaw(`> **${unverifiedRiskCount} package(s) have incomplete data** (marked ⚠️). `);
+      summary.addRaw("Risk levels may be inaccurate due to missing repository information.\n\n");
+    }
   }
 
   // Per-manifest details in collapsible sections

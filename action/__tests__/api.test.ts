@@ -35,14 +35,14 @@ describe("PkgWatchClient", () => {
       const result = await client.scan({ lodash: "^4.17.21" });
 
       expect(mockFetch).toHaveBeenCalledWith(
-        "https://api.pkgwatch.laranjo.dev/v1/scan",
+        "https://api.pkgwatch.laranjo.dev/scan",
         expect.objectContaining({
           method: "POST",
           headers: expect.objectContaining({
             "X-API-Key": "pw_test-api-key",
             "Content-Type": "application/json",
           }),
-          body: JSON.stringify({ dependencies: { lodash: "^4.17.21" } }),
+          body: JSON.stringify({ dependencies: { lodash: "^4.17.21" }, ecosystem: "npm" }),
         })
       );
       expect(result).toEqual(mockResponse);
@@ -108,16 +108,14 @@ describe("PkgWatchClient - API Key Validation", () => {
     );
   });
 
-  it("rejects empty API keys", () => {
-    expect(() => new PkgWatchClient("")).toThrow(
-      "API key is required and cannot be empty"
-    );
+  it("accepts empty API keys for demo mode", () => {
+    // Empty string enables demo mode - should not throw
+    expect(() => new PkgWatchClient("")).not.toThrow();
   });
 
-  it("rejects whitespace-only API keys", () => {
-    expect(() => new PkgWatchClient("   ")).toThrow(
-      "API key is required and cannot be empty"
-    );
+  it("accepts whitespace-only API keys for demo mode", () => {
+    // Whitespace-only treated as empty, enables demo mode - should not throw
+    expect(() => new PkgWatchClient("   ")).not.toThrow();
   });
 
   it("accepts valid pw_ prefixed keys", () => {

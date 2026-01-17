@@ -99,6 +99,7 @@ def _queue_packages_for_collection(packages: list[str], ecosystem: str) -> int:
 # Import from shared module (bundled with Lambda)
 from shared.auth import validate_api_key, check_and_increment_usage_batch
 from shared.response_utils import error_response, decimal_default, get_cors_headers
+from shared.data_quality import build_data_quality_compact
 
 
 def get_reset_timestamp() -> int:
@@ -257,6 +258,8 @@ def handler(event, context):
                             "is_deprecated": item.get("is_deprecated", False),
                             "archived": item.get("archived", False),
                             "last_updated": item.get("last_updated"),
+                            # Data completeness indicator
+                            "data_quality": build_data_quality_compact(item),
                         })
 
                 # Check for unprocessed keys
@@ -297,6 +300,28 @@ def handler(event, context):
     medium_count = sum(1 for r in results if r["risk_level"] == "MEDIUM")
     low_count = sum(1 for r in results if r["risk_level"] == "LOW")
 
+    # Calculate data quality summary in single pass
+    quality_counts = {"verified": 0, "partial": 0, "unverified": 0}
+    verified_risk = 0
+    unverified_risk = 0
+
+    for r in results:
+        assessment = r.get("data_quality", {}).get("assessment", "UNVERIFIED")
+        risk = r.get("risk_level")
+
+        if assessment == "VERIFIED":
+            quality_counts["verified"] += 1
+            if risk in ("HIGH", "CRITICAL"):
+                verified_risk += 1
+        elif assessment == "PARTIAL":
+            quality_counts["partial"] += 1
+            if risk in ("HIGH", "CRITICAL"):
+                unverified_risk += 1
+        else:
+            quality_counts["unverified"] += 1
+            if risk in ("HIGH", "CRITICAL"):
+                unverified_risk += 1
+
     # Sort results by risk (CRITICAL first, LOW last)
     risk_order = {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "LOW": 3, None: 4}
     results.sort(key=lambda x: (risk_order.get(x["risk_level"], 4), x["package"]))
@@ -322,6 +347,14 @@ def handler(event, context):
         "low": low_count,
         "packages": results,
         "not_found": not_found,
+        # Data quality breakdown
+        "data_quality": {
+            "verified_count": quality_counts["verified"],
+            "partial_count": quality_counts["partial"],
+            "unverified_count": quality_counts["unverified"],
+        },
+        "verified_risk_count": verified_risk,
+        "unverified_risk_count": unverified_risk,
     }
 
     # Add discovery info if packages were queued for collection

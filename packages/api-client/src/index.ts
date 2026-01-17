@@ -15,12 +15,14 @@ const DEFAULT_MAX_RETRIES = 3;
 
 export interface PackageHealth {
   package: string;
-  health_score: number;
+  health_score: number | null;
   risk_level: RiskLevel;
   abandonment_risk: AbandonmentRisk;
   is_deprecated: boolean;
   archived: boolean;
   last_updated: string;
+  // Data completeness indicator
+  data_quality?: DataQualityCompact;
 }
 
 export interface PackageHealthFull extends PackageHealth {
@@ -34,6 +36,8 @@ export interface PackageHealthFull extends PackageHealth {
   repository_url: string;
   openssf_checks?: OpenSSFChecks;
   usage_alert?: UsageAlert;
+  // Full data quality info (overrides compact from PackageHealth)
+  data_quality?: DataQuality;
 }
 
 export type RiskLevel = "LOW" | "MEDIUM" | "HIGH" | "CRITICAL";
@@ -89,6 +93,34 @@ export interface UsageAlert {
   message: string;
 }
 
+// Data quality types for completeness transparency
+export type AssessmentCategory = "VERIFIED" | "PARTIAL" | "UNVERIFIED";
+
+export interface DataQuality {
+  status?: "complete" | "partial" | "minimal";
+  assessment: AssessmentCategory;
+  missing_sources?: string[];
+  has_repository: boolean;
+  explanation?: string;
+}
+
+export interface DataQualityCompact {
+  assessment: AssessmentCategory;
+  has_repository: boolean;
+}
+
+export interface DataQualitySummary {
+  verified_count: number;
+  partial_count: number;
+  unverified_count: number;
+}
+
+export interface DiscoveryInfo {
+  queued: number;
+  skipped: number;
+  message: string;
+}
+
 export interface ScanResult {
   total: number;
   critical: number;
@@ -98,6 +130,12 @@ export interface ScanResult {
   packages: PackageHealth[];
   not_found?: string[];
   usage_alert?: UsageAlert;
+  // Data quality breakdown
+  data_quality?: DataQualitySummary;
+  verified_risk_count?: number;
+  unverified_risk_count?: number;
+  // Discovery info when packages are queued for collection
+  discovery?: DiscoveryInfo;
 }
 
 export interface UsageStats {

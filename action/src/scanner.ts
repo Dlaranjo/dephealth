@@ -162,6 +162,29 @@ export async function scanDependencies(
     core.warning(`${failedBatches} batch(es) failed. Results may be incomplete.`);
   }
 
+  // Aggregate data quality counts
+  let verifiedCount = 0;
+  let partialCount = 0;
+  let unverifiedCount = 0;
+  let verifiedRiskCount = 0;
+  let unverifiedRiskCount = 0;
+
+  for (const pkg of allPackages) {
+    const assessment = pkg.data_quality?.assessment || "UNVERIFIED";
+    const isHighRisk = pkg.risk_level === "HIGH" || pkg.risk_level === "CRITICAL";
+
+    if (assessment === "VERIFIED") {
+      verifiedCount++;
+      if (isHighRisk) verifiedRiskCount++;
+    } else if (assessment === "PARTIAL") {
+      partialCount++;
+      if (isHighRisk) unverifiedRiskCount++;
+    } else {
+      unverifiedCount++;
+      if (isHighRisk) unverifiedRiskCount++;
+    }
+  }
+
   // Aggregate results
   return {
     total: allPackages.length,
@@ -171,6 +194,13 @@ export async function scanDependencies(
     low: allPackages.filter((p: PackageHealth) => p.risk_level === "LOW").length,
     packages: allPackages,
     not_found: notFound.length > 0 ? notFound : undefined,
+    data_quality: {
+      verified_count: verifiedCount,
+      partial_count: partialCount,
+      unverified_count: unverifiedCount,
+    },
+    verified_risk_count: verifiedRiskCount,
+    unverified_risk_count: unverifiedRiskCount,
     format,
     ecosystem,
   };
