@@ -627,16 +627,13 @@ export class ApiStack extends cdk.Stack {
         dataTraceEnabled: false,
         metricsEnabled: true,
         tracingEnabled: true, // Enable X-Ray tracing for end-to-end traces
-        cachingEnabled: true,
-        cacheClusterEnabled: true,
-        cacheClusterSize: "0.5", // 0.5 GB cache (~$15-20/month)
-        cacheTtl: cdk.Duration.minutes(5),
-        // Per-method cache settings (path parameters must be explicitly added via cacheKeyParameters)
+        cachingEnabled: false,
+        cacheClusterEnabled: false,
+        // Cache disabled to save ~$14/month - not cost-effective at current traffic levels
+        // Per-method settings (caching disabled globally)
         methodOptions: {
           "/packages/{ecosystem}/{name}/GET": {
-            cachingEnabled: true,
-            cacheTtl: cdk.Duration.minutes(5),
-            cacheDataEncrypted: true,
+            cachingEnabled: false,
           },
           // Disable caching for user-specific endpoints that change frequently
           "/auth/me/GET": {
