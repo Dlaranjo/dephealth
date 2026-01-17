@@ -5,6 +5,8 @@ import { ScanResult, PackageHealth, RepoScanResult, ManifestScanResult } from ".
 declare const __VERSION__: string;
 const VERSION = typeof __VERSION__ !== "undefined" ? __VERSION__ : "1.0.0";
 
+const GITHUB_REPO = "https://github.com/Dlaranjo/pkgwatch";
+
 export async function generateSummary(
   result: ScanResult,
   failed: boolean,
@@ -113,9 +115,19 @@ export async function generateSummary(
     summary.addRaw("\n\n");
   }
 
-  // Footer
+  // Footer with contextual feedback links
   summary.addRaw("\n---\n");
-  summary.addRaw(`*[PkgWatch](https://pkgwatch.laranjo.dev) v${VERSION}*\n`);
+  if (hasIssues) {
+    summary.addRaw(
+      `*[PkgWatch](https://pkgwatch.laranjo.dev?utm_source=action&utm_medium=summary) v${VERSION}* | ` +
+      `[Wrong score?](${GITHUB_REPO}/issues/new?template=bug_report.yml&labels=bug,action,false-positive) | ` +
+      `[Feedback](${GITHUB_REPO}/discussions/new?category=feedback)\n`
+    );
+  } else {
+    summary.addRaw(
+      `*[PkgWatch](https://pkgwatch.laranjo.dev?utm_source=action&utm_medium=summary) v${VERSION}*\n`
+    );
+  }
 
   await summary.write();
 }
@@ -330,9 +342,19 @@ export async function generateRepoSummary(
     summary.addRaw("\n\n");
   }
 
-  // Footer
+  // Footer with contextual feedback links
   summary.addRaw("\n---\n");
-  summary.addRaw(`*[PkgWatch](https://pkgwatch.laranjo.dev) v${VERSION}*\n`);
+  if (hasIssues) {
+    summary.addRaw(
+      `*[PkgWatch](https://pkgwatch.laranjo.dev?utm_source=action&utm_medium=summary) v${VERSION}* | ` +
+      `[Wrong score?](${GITHUB_REPO}/issues/new?template=bug_report.yml&labels=bug,action,false-positive) | ` +
+      `[Feedback](${GITHUB_REPO}/discussions/new?category=feedback)\n`
+    );
+  } else {
+    summary.addRaw(
+      `*[PkgWatch](https://pkgwatch.laranjo.dev?utm_source=action&utm_medium=summary) v${VERSION}*\n`
+    );
+  }
 
   await summary.write();
 }

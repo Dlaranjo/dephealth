@@ -183,3 +183,140 @@ describe("escapeMarkdown (via generateSummary)", () => {
     expect(core.summary.addTable).toHaveBeenCalled();
   });
 });
+
+describe("feedback links in footer", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("shows feedback links when CRITICAL issues found", async () => {
+    const result: ScanResult = {
+      total: 5,
+      critical: 1,
+      high: 0,
+      medium: 2,
+      low: 2,
+      packages: [],
+    };
+
+    await generateSummary(result, false, "");
+
+    expect(core.summary.addRaw).toHaveBeenCalledWith(
+      expect.stringContaining("Wrong score?")
+    );
+    expect(core.summary.addRaw).toHaveBeenCalledWith(
+      expect.stringContaining("Feedback")
+    );
+  });
+
+  it("shows feedback links when HIGH issues found", async () => {
+    const result: ScanResult = {
+      total: 5,
+      critical: 0,
+      high: 2,
+      medium: 2,
+      low: 1,
+      packages: [],
+    };
+
+    await generateSummary(result, false, "");
+
+    expect(core.summary.addRaw).toHaveBeenCalledWith(
+      expect.stringContaining("Wrong score?")
+    );
+  });
+
+  it("hides feedback links when no HIGH/CRITICAL issues", async () => {
+    const result: ScanResult = {
+      total: 5,
+      critical: 0,
+      high: 0,
+      medium: 2,
+      low: 3,
+      packages: [],
+    };
+
+    await generateSummary(result, false, "");
+
+    // Check that addRaw was NOT called with "Wrong score?"
+    const addRawCalls = (core.summary.addRaw as any).mock.calls;
+    const hasWrongScoreLink = addRawCalls.some(
+      (call: string[]) => call[0] && call[0].includes("Wrong score?")
+    );
+    expect(hasWrongScoreLink).toBe(false);
+  });
+
+  it("includes UTM parameters in PkgWatch link", async () => {
+    const result: ScanResult = {
+      total: 1,
+      critical: 1,
+      high: 0,
+      medium: 0,
+      low: 0,
+      packages: [],
+    };
+
+    await generateSummary(result, false, "");
+
+    expect(core.summary.addRaw).toHaveBeenCalledWith(
+      expect.stringContaining("utm_source=action")
+    );
+    expect(core.summary.addRaw).toHaveBeenCalledWith(
+      expect.stringContaining("utm_medium=summary")
+    );
+  });
+
+  it("shows feedback links when both CRITICAL and HIGH issues found", async () => {
+    const result: ScanResult = {
+      total: 5,
+      critical: 2,
+      high: 3,
+      medium: 0,
+      low: 0,
+      packages: [],
+    };
+
+    await generateSummary(result, false, "");
+
+    expect(core.summary.addRaw).toHaveBeenCalledWith(
+      expect.stringContaining("Wrong score?")
+    );
+  });
+
+  it("feedback link points to discussions", async () => {
+    const result: ScanResult = {
+      total: 1,
+      critical: 1,
+      high: 0,
+      medium: 0,
+      low: 0,
+      packages: [],
+    };
+
+    await generateSummary(result, false, "");
+
+    expect(core.summary.addRaw).toHaveBeenCalledWith(
+      expect.stringContaining("discussions/new?category=feedback")
+    );
+  });
+
+  it("wrong score link points to bug report template", async () => {
+    const result: ScanResult = {
+      total: 1,
+      critical: 1,
+      high: 0,
+      medium: 0,
+      low: 0,
+      packages: [],
+    };
+
+    await generateSummary(result, false, "");
+
+    expect(core.summary.addRaw).toHaveBeenCalledWith(
+      expect.stringContaining("template=bug_report.yml")
+    );
+    expect(core.summary.addRaw).toHaveBeenCalledWith(
+      expect.stringContaining("labels=bug,action,false-positive")
+    );
+  });
+});

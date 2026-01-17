@@ -7,10 +7,12 @@
  *   pkgwatch scan [path]          Scan package.json dependencies
  *   pkgwatch usage                Show API usage statistics
  *   pkgwatch config <action>      Manage configuration
+ *   pkgwatch feedback             Send feedback or report issues
  */
 
 import { program, Option } from "commander";
 import picocolors from "picocolors";
+import open from "open";
 
 // Use mutable binding so we can swap to no-color version
 // Type as ReturnType of createColors since that's what we'll assign
@@ -26,6 +28,9 @@ import { createRequire } from "node:module";
 const EXIT_SUCCESS = 0;
 const EXIT_RISK_EXCEEDED = 1;
 const EXIT_CLI_ERROR = 2;
+
+// GitHub repo URL for feedback links
+const GITHUB_REPO = "https://github.com/Dlaranjo/pkgwatch";
 
 // Global unhandled rejection handler to prevent silent crashes
 // Check NO_COLOR directly since pc might not be updated yet (preAction hasn't run)
@@ -64,6 +69,20 @@ function log(message: string): void {
  */
 function logVerbose(message: string): void {
   if (verboseMode) console.log(pc.dim(`[verbose] ${message}`));
+}
+
+/**
+ * Open a URL in the default browser with fallback for headless environments.
+ */
+async function openUrl(url: string, description: string): Promise<void> {
+  try {
+    await open(url);
+    log(pc.green(`Opened ${description} in your browser`));
+  } catch {
+    // Fallback for headless/WSL/CI environments
+    log(pc.yellow("Could not open browser automatically."));
+    log(pc.dim(`Please visit: ${pc.underline(url)}`));
+  }
 }
 
 /**
@@ -1250,6 +1269,40 @@ configCmd
     process.exit(EXIT_SUCCESS);
   });
 
+// ------------------------------------------------------------
+// feedback - Send feedback or report issues
+// ------------------------------------------------------------
+const feedbackCmd = program
+  .command("feedback")
+  .description("Send feedback or report issues");
+
+feedbackCmd
+  .command("bug")
+  .description("Report a bug")
+  .action(async () => {
+    const url = `${GITHUB_REPO}/issues/new?template=bug_report.yml&labels=bug,cli`;
+    await openUrl(url, "bug report form");
+    process.exit(EXIT_SUCCESS);
+  });
+
+feedbackCmd
+  .command("feature")
+  .alias("idea")
+  .description("Request a feature")
+  .action(async () => {
+    const url = `${GITHUB_REPO}/issues/new?template=feature_request.yml&labels=enhancement,cli`;
+    await openUrl(url, "feature request form");
+    process.exit(EXIT_SUCCESS);
+  });
+
+feedbackCmd
+  .action(async () => {
+    // Default action: open issue chooser
+    const url = `${GITHUB_REPO}/issues/new/choose`;
+    await openUrl(url, "feedback options");
+    process.exit(EXIT_SUCCESS);
+  });
+
 // Add help text with exit codes and examples
 program.addHelpText('after', `
 Exit Codes:
@@ -1272,6 +1325,9 @@ Examples:
   pkgwatch scan -r --max-manifests 50  Limit to 50 manifests
   pkgwatch scan -r --ignore-not-found  Hide packages not found in registry
   pkgwatch doctor                      Diagnose configuration issues
+  pkgwatch feedback                    Open feedback options
+  pkgwatch feedback bug                Report a bug
+  pkgwatch feedback feature            Request a new feature
 
 Supported dependency files:
   npm:  package.json
