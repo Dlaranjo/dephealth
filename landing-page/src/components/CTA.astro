@@ -58,17 +58,18 @@
     const AUTH_CACHE_KEY = 'pkgwatch_auth_cache';
 
     function updateCTAAuth(isLoggedIn: boolean) {
-      const guestBtn = document.getElementById('cta-guest');
-      const userBtn = document.getElementById('cta-user');
+      const guestBtn = document.getElementById('cta-guest') as HTMLElement;
+      const userBtn = document.getElementById('cta-user') as HTMLElement;
 
       if (!guestBtn || !userBtn) return; // Elements not ready yet
 
+      // Use inline style to ensure display is set correctly (avoids CSS specificity issues)
       if (isLoggedIn) {
-        guestBtn.classList.add('hidden');
-        userBtn.classList.remove('hidden');
+        guestBtn.style.display = 'none';
+        userBtn.style.display = 'inline-flex';
       } else {
-        guestBtn.classList.remove('hidden');
-        userBtn.classList.add('hidden');
+        guestBtn.style.display = 'inline-flex';
+        userBtn.style.display = 'none';
       }
     }
 
